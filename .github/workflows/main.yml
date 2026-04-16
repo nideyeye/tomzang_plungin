@@ -1,11 +1,11 @@
-name: Build and Release Zip
+name: Build & Release Zip
 
 on:
   push:
     branches:
       - main
 
-# 👇 加上这个权限，解决 403 错误
+# 必须加，否则无法创建 release
 permissions:
   contents: write
 
@@ -16,23 +16,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get version
-        id: version
-        run: echo "version=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+      # 获取仓库名称（自动获取）
+      - name: Get repo name
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY#*/}" >> $GITHUB_ENV
 
+      # 生成时间戳
+      - name: Generate timestamp
+        run: echo "TIMESTAMP=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+
+      # 打包：仓库名-时间戳.zip
       - name: Zip project
         run: |
-          zip -r project-${{ steps.version.outputs.version }}.zip . \
-            -x ".git/*" \
-            -x ".github/*" \
-            -x "node_modules/*" \
-            -x "*.gitignore" 
-            
-      - name: Upload to Release
+          zip -r "${{ env.REPO_NAME }}-${{ env.TIMESTAMP }}.zip" . \
+            -x ".git/**" \
+            -x ".github/**" \
+            -x "node_modules/**" \
+            -x "*.gitignore" \
+            -x "__pycache__/**" \
+            -x "*.log"
+
+      # 上传到 Release
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ steps.version.outputs.version }}
-          tag_name: ${{ steps.version.outputs.version }}
-          files: project-${{ steps.version.outputs.version }}.zip
+          name: Release ${{ env.TIMESTAMP }}
+          tag_name: ${{ env.TIMESTAMP }}
+          files: ${{ env.REPO_NAME }}-${{ env.TIMESTAMP }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
