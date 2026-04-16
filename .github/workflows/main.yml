@@ -1,0 +1,38 @@
+name: Build and Release Zip
+
+# 触发条件：每次代码推送到 main 分支
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 生成时间戳作为版本号（避免重复）
+      - name: Get version
+        id: version
+        run: echo "version=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_OUTPUT
+
+      # 打包整个项目为 zip（排除 .git 等无用文件）
+      - name: Zip project
+        run: |
+          zip -r project-${{ steps.version.outputs.version }}.zip . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x "node_modules/*" \
+            -x "*.gitignore" \
+
+      # 创建 Release 并上传 zip
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.version }}
+          files: project-${{ steps.version.outputs.version }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
