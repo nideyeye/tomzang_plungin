@@ -1,29 +1,29 @@
 // ─── 配置解析 ───
 
-var DEFAULT_FIREWALL_URL = "http://192.168.1.16:8080/api/firewall/openclaw/validate";
-var DEFAULT_AUTH_KEY = "4e66797194a79524b089d993dfe31815099e21f29395b09aede30631c3d02b76";
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
-var DEFAULT_CONFIG = {
-  firewallUrl: DEFAULT_FIREWALL_URL,
-  authKey: DEFAULT_AUTH_KEY,
-  blockMessage: DEFAULT_BLOCK_MESSAGE,
-  debug: false
-};
 
 function resolveConfig(rawConfig) {
   var cfg = rawConfig ?? {};
   return {
     firewallUrl: typeof cfg.firewallUrl === "string" && cfg.firewallUrl.trim() !== ""
       ? cfg.firewallUrl.trim()
-      : DEFAULT_FIREWALL_URL,
+      : "",
     authKey: typeof cfg.authKey === "string" && cfg.authKey.trim() !== ""
       ? cfg.authKey.trim()
-      : DEFAULT_AUTH_KEY,
+      : "",
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
-    debug: typeof cfg.debug === "boolean" ? cfg.debug : DEFAULT_CONFIG.debug
+    debug: typeof cfg.debug === "boolean" ? cfg.debug : false
   };
+}
+
+// 检查必要配置是否完整
+function validateConfig(config) {
+  var missing = [];
+  if (!config.firewallUrl) missing.push("firewallUrl");
+  if (!config.authKey) missing.push("authKey");
+  return missing;
 }
 
 // ─── 日志 ───
@@ -387,17 +387,38 @@ var plugin = {
     type: "object",
     additionalProperties: false,
     properties: {
-      firewallUrl: { type: "string", default: DEFAULT_FIREWALL_URL, description: "Firewall API URL for content validation" },
-      authKey: { type: "string", default: DEFAULT_AUTH_KEY, description: "Authentication key for the firewall API" },
+      firewallUrl: { type: "string", description: "Firewall API URL for content validation (required)" },
+      authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
       debug: { type: "boolean", default: false, description: "Enable debug mode" }
-    }
+    },
+    required: ["firewallUrl", "authKey"]
   },
 
   register: function (api) {
     var config = resolveConfig(api.pluginConfig);
     currentLogger = api.logger;
     debugMode = config.debug;
+
+    // 检查必要配置
+    var missingFields = validateConfig(config);
+    if (missingFields.length > 0) {
+      logError("init", "missing_required_config", {
+        missing: missingFields,
+        message: "插件缺少必要配置项: " + missingFields.join(", ") + "。请在 openclaw.json 的 plugins.entries.tomzang_plungin.config 中配置这些字段。"
+      });
+      // 仍然注册生命周期钩子（仅日志），但不注册防火墙拦截
+      api.on("before_prompt_build", async function (event, ctx) {
+        logDebug("hook", "before_prompt_build", { agentId: ctx.agentId, sessionKey: ctx.sessionKey });
+      });
+      api.on("session_start", async function (event, ctx) {
+        logDebug("hook", "session_start", { agentId: ctx.agentId, sessionId: event.sessionId });
+      });
+      api.on("session_end", async function (event, ctx) {
+        logDebug("hook", "session_end", { agentId: ctx.agentId, sessionId: event.sessionId });
+      });
+      return;
+    }
 
     logDebug("init", "register", {
       firewallUrl: config.firewallUrl,

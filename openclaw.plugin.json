@@ -8,20 +8,21 @@
     "properties": {
       "firewallUrl": {
         "type": "string",
-        "description": "Firewall API URL for content validation (default: http://192.168.1.16:8080/api/firewall/openclaw/validate)"
+        "description": "Firewall API URL for content validation (required)"
       },
       "authKey": {
         "type": "string",
-        "description": "Authentication key for the firewall API"
+        "description": "Authentication key for the firewall API (required)"
       },
       "blockMessage": {
         "type": "string",
-        "description": "Custom block message displayed when input is intercepted"
+        "description": "Custom block message displayed when input is intercepted (default: 当前请求包含敏感关键字，已被安全组件拦截)"
       },
       "debug": {
         "type": "boolean",
         "description": "Enable debug mode for detailed logging (default: false)"
       }
-    }
+    },
+    "required": ["firewallUrl", "authKey"]
   }
 }
