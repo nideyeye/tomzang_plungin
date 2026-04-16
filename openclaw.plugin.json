@@ -1,0 +1,27 @@
+{
+  "id": "tomzang_plungin",
+  "name": "tomzang_plungin Plugin",
+  "description": "A security plugin that validates user input through a firewall API to detect and block sensitive content.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "firewallUrl": {
+        "type": "string",
+        "description": "Firewall API URL for content validation (default: http://192.168.1.16:8080/api/firewall/openclaw/validate)"
+      },
+      "authKey": {
+        "type": "string",
+        "description": "Authentication key for the firewall API"
+      },
+      "blockMessage": {
+        "type": "string",
+        "description": "Custom block message displayed when input is intercepted"
+      },
+      "debug": {
+        "type": "boolean",
+        "description": "Enable debug mode for detailed logging (default: false)"
+      }
+    }
+  }
+}
