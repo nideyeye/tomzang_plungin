@@ -1,13 +1,18 @@
 // ─── 配置解析 ───
 
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
+var FIREWALL_API_PATH = "/api/firewall/openclaw/validate";
+
+function buildFullFirewallUrl(host) {
+  if (!host) return "";
+  var base = host.trim().replace(/\/+$/, "");
+  return base + FIREWALL_API_PATH;
+}
 
 function resolveConfig(rawConfig) {
   var cfg = rawConfig ?? {};
   return {
-    firewallUrl: typeof cfg.firewallUrl === "string" && cfg.firewallUrl.trim() !== ""
-      ? cfg.firewallUrl.trim()
-      : "",
+    firewallUrl: buildFullFirewallUrl(cfg.firewallUrl),
     authKey: typeof cfg.authKey === "string" && cfg.authKey.trim() !== ""
       ? cfg.authKey.trim()
       : "",
@@ -89,6 +94,8 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
   logDebug("firewall", "api_request", {
     callId: callId,
     stage: stage,
+    url: config.firewallUrl,
+    requestBody: requestBody,
     promptPreview: prompt ? prompt.slice(0, 200) : ""
   });
 
@@ -110,6 +117,13 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
 
     var result = await resp.json();
 
+    logDebug("firewall", "api_raw_response", {
+      callId: callId,
+      url: config.firewallUrl,
+      responseBody: result,
+      durationMs: durationMs
+    });
+
     if (result && result.code === 200 && result.data) {
       var data = result.data;
       logDebug("firewall", "api_response", {
@@ -118,6 +132,7 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
         result: data.result,
         riskLevel: data.risk_level,
         violationReason: data.violation_reason,
+        hitRules: data.hit_rules,
         durationMs: durationMs
       });
       return {
@@ -387,7 +402,7 @@ var plugin = {
     type: "object",
     additionalProperties: false,
     properties: {
-      firewallUrl: { type: "string", description: "Firewall API URL for content validation (required)" },
+      firewallUrl: { type: "string", description: "Firewall API host and port, e.g. http://localhost:8080 (required, path /api/firewall/openclaw/validate will be appended automatically)" },
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
       debug: { type: "boolean", default: false, description: "Enable debug mode" }
