@@ -96,7 +96,7 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
     stage: stage,
     url: config.firewallUrl,
     requestBody: requestBody,
-    promptPreview: prompt ? prompt.slice(0, 200) : ""
+    promptPreview: prompt || ""
   });
 
   try {
@@ -155,8 +155,6 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
 }
 
 // ─── 用户输入提取 ───
-
-// 从OpenAI格式的请求体中提取最后一条用户输入内容
 function extractLastUserPrompt(reqBodyText) {
   if (!reqBodyText) return "";
   try {
@@ -165,7 +163,10 @@ function extractLastUserPrompt(reqBodyText) {
       for (var i = obj.messages.length - 1; i >= 0; i--) {
         var msg = obj.messages[i];
         if (msg.role === "user" && msg.content) {
-          return typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+          var raw = typeof msg.content === "string"
+            ? msg.content
+            : extractTextFromContentArray(msg.content);
+          return stripMetadataPrefix(raw);
         }
       }
       return "";
@@ -174,6 +175,70 @@ function extractLastUserPrompt(reqBodyText) {
   } catch (e) {
     return reqBodyText.slice(0, 2000);
   }
+}
+
+/**
+ * 从飞书适配器的 content 数组中拼接所有 text 片段
+ * content 形如: [{"type":"text","text":"..."},{"type":"text","text":"..."}]
+ */
+function extractTextFromContentArray(contentArray) {
+  if (!Array.isArray(contentArray)) {
+    return typeof contentArray === "string" ? contentArray : JSON.stringify(contentArray);
+  }
+  var texts = [];
+  for (var i = 0; i < contentArray.length; i++) {
+    var item = contentArray[i];
+    if (item && typeof item.text === "string") {
+      texts.push(item.text);
+    }
+  }
+  return texts.join("\n") || JSON.stringify(contentArray);
+}
+
+/**
+ * 去除系统前缀 / 元数据块，提取末尾真正的用户输入
+ *
+ * 已知的噪声结构（按出现顺序）：
+ *   1. System: [...] Feishu[...] DM | ...\n\n
+ *   2. Conversation info (untrusted metadata):\n```json\n{...}\n```\n\n
+ *   3. Sender (untrusted metadata):\n```json\n{...}\n```\n\n
+ *
+ * 策略：找到最后一个 ``` 代码块结束标记后面的内容；
+ *       再去掉可能的时间戳行前缀 [Mon 2026-04-20 18:08 GMT+8]
+ */
+function stripMetadataPrefix(text) {
+  if (!text || typeof text !== "string") return text || "";
+
+  // 找最后一个 ``` 标记的位置（元数据代码块的结束）
+  var lastFence = text.lastIndexOf("```");
+  if (lastFence !== -1) {
+    // 取 ``` 之后的内容
+    var afterFence = text.substring(lastFence + 3);
+    // 去掉开头的空白换行
+    afterFence = afterFence.replace(/^\s*\n*/, "");
+    if (afterFence.length > 0) {
+      return stripTimestampPrefix(afterFence).trim();
+    }
+    // 如果 ``` 后面没内容，回退到原文
+  }
+
+  // 没有 ``` 代码块的情况：尝试按 \n\n 分割，取最后一段
+  var parts = text.split(/\n\n/);
+  var lastPart = parts[parts.length - 1];
+  if (lastPart && lastPart.trim().length > 0) {
+    return stripTimestampPrefix(lastPart).trim();
+  }
+
+  return text.trim();
+}
+
+/**
+ * 去掉 control-ui 自带聊天可能附加的时间戳前缀
+ * 例如: "[Mon 2026-04-20 18:08 GMT+8] 打开浏览器" → "打开浏览器"
+ */
+function stripTimestampPrefix(text) {
+  // 匹配 [Mon 2026-04-20 18:08 GMT+8] 或 [2026-04-20 18:08:22 GMT+8] 等格式
+  return text.replace(/^\[.*?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s+GMT[^\]]*\]\s*/, "");
 }
 
 // 判断是否为内置命令（以 / 开头的指令，如 /reset, /help, /clear 等）
