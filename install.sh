@@ -152,7 +152,9 @@ resolve_latest_release() {
   local tag="" url=""
   if command -v node >/dev/null 2>&1; then
     # 使用 node 严谨解析 JSON: 优先 .tar.gz/.tgz/.zip 资产, 否则用 tarball_url
-    read -r tag url < <(BODY="${body}" node -e '
+    # 注意: 这里使用命令替换而非进程替换 <(...), 保持 POSIX sh 兼容
+    local parsed=""
+    parsed="$(BODY="${body}" node -e '
       const r = JSON.parse(process.env.BODY);
       const tag = r.tag_name || "";
       let url = "";
@@ -162,7 +164,15 @@ resolve_latest_release() {
       if (pick) url = pick.browser_download_url;
       else if (r.tarball_url) url = r.tarball_url;
       console.log(tag + " " + url);
-    ' 2>/dev/null) || true
+    ' 2>/dev/null)" || parsed=""
+    if [ -n "${parsed}" ]; then
+      tag="${parsed%% *}"
+      url="${parsed#* }"
+      # 处理 url 仍等于 parsed 的情况 (说明 parsed 中没有空格, 即 url 为空)
+      if [ "${url}" = "${parsed}" ] && [ "${tag}" = "${parsed}" ]; then
+        url=""
+      fi
+    fi
   else
     # 退化: 使用 grep/sed 抓取字段, 容忍度有限但能覆盖 GitHub 标准响应
     tag="$(printf '%s' "${body}" | grep -m1 '"tag_name"' \
