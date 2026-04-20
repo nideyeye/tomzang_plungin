@@ -69,6 +69,45 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 
 ## 安装
 
+### 方式一：使用安装脚本（推荐）
+
+仓库根目录提供了 `install.sh`，会自动下载并部署插件，写入 `~/.openclaw/openclaw.json` 中的 `plugins.entries.tomzang_plungin.config`。
+
+```bash
+./install.sh <firewallUrl> <authKey> [blockMessage] [debug]
+```
+
+参数说明：
+
+| 位置参数 | 必填 | 对应配置项 | 说明 |
+|----------|------|------------|------|
+| `firewallUrl` | 是 | `firewallUrl` | 防火墙 API 地址 |
+| `authKey` | 是 | `authKey` | 防火墙 API 认证密钥 |
+| `blockMessage` | 否 | `blockMessage` | 自定义拦截提示语 |
+| `debug` | 否 | `debug` | 是否开启调试日志，`true`/`false` |
+
+示例：
+
+```bash
+./install.sh http://127.0.0.1:8080/api/firewall/openclaw/validate my-auth-key
+```
+
+安装与配置策略（按优先级，前者失败自动回退）：
+
+1. **CLI 优先**：调用 `openclaw plugins install clawhub:tomzang_plungin` 完成安装，并使用 `openclaw plugins config tomzang_plungin key=value` 写入全部配置项，最后尝试 `openclaw plugins enable tomzang_plungin`。
+2. **GitHub Release 回退**：当本机未安装 `openclaw` CLI 或 CLI 执行失败时，调用 GitHub API `GET /repos/nideyeye/tomzang_plungin/releases/latest` 解析最新 release，优先下载其中的 `.tar.gz` / `.tgz` / `.zip` 资产；若 release 没有资产则回退到 release 的源码 `tarball_url`（绑定在 release 对应 tag 上）。**不再使用 `main` 分支打包**。解压后部署到 `~/.openclaw/extensions/tomzang_plungin/`。可通过环境变量 `GITHUB_TOKEN` 提升 API 速率限制（私仓必填）。
+3. **配置回退**：当 CLI 配置失败（或走的是 GitHub 分支）时，直接合并写入 `~/.openclaw/openclaw.json`，同时维护以下三处，确保插件不会因不在允许列表而被禁用：
+   - `plugins.entries.tomzang_plungin`：写入 `enabled: true` 与配置项；
+   - `plugins.allow`：将 `tomzang_plungin` 加入 allowlist（消除 `not in allowlist` 警告的关键）；
+   - `plugins.load.paths`：将 `~/.openclaw/extensions/tomzang_plungin` 加入扫描路径。
+4. **allowlist 兜底**：写入完成后会再次校验 `plugins.allow`，若插件仍未出现在其中，将再次执行直接写入流程进行兜底。
+5. **自动备份**：已存在的插件目录与 `openclaw.json` 会先被备份为 `.bak.YYYYMMDD_HHMMSS` 后缀文件。
+6. **生效方式**：完成后执行 `openclaw gateway restart` 重启网关使配置生效。
+
+依赖：`curl`、`tar`（GitHub 回退时使用）；建议安装 `node`（用于回退路径合并 JSON；缺失时脚本会输出需手动追加的 JSON 片段）。如果已安装 `openclaw` CLI，则通常无需额外依赖。
+
+### 方式二：手动安装
+
 将插件目录放置在 `~/.openclaw/extensions/tomzang_plungin/` 下，确保包含以下文件：
 
 - `index.js` — 插件主逻辑
