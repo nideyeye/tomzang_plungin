@@ -194,7 +194,7 @@ function extractLastUserPrompt(reqBodyText) {
 
 /**
  * 从飞书适配器的 content 数组中拼接所有 text 片段
- * content 形如: [{"type":"text","text":"..."},{"type":"text","text":"..."}]
+ * content 形如: [{\"type\":\"text\",\"text\":\"...\"},{\"type\":\"text\",\"text\":\"...\"}]
  */
 function extractTextFromContentArray(contentArray) {
   if (!Array.isArray(contentArray)) {
@@ -901,6 +901,86 @@ function matchProviderByUrl(url, providers) {
   return null;
 }
 
+// ─── LLM 请求智能识别 ───
+
+/**
+ * 已知的 LLM API 路径特征
+ * 覆盖 OpenAI、Anthropic、Azure OpenAI、Google Gemini、Ollama、各类国产大模型网关等
+ */
+var LLM_API_PATH_PATTERNS = [
+  /\/chat\/completions/i,
+  /\/v1\/messages/i,           // Anthropic
+  /\/v1\/complete/i,           // Anthropic legacy
+  /\/completions/i,            // OpenAI legacy completions
+  /\/v1\/engines\/.*\/completions/i,  // Azure OpenAI
+  /\/deployments\/.*\/chat\/completions/i, // Azure OpenAI
+  /\/v1beta\/models\/.*:generateContent/i, // Google Gemini
+  /\/v1\/models\/.*:generateContent/i,     // Google Gemini
+  /\/api\/generate/i,          // Ollama
+  /\/api\/chat/i,              // Ollama
+];
+
+/**
+ * 通过 URL 路径特征判断是否为 LLM API 请求
+ */
+function isLlmApiUrl(url) {
+  for (var i = 0; i < LLM_API_PATH_PATTERNS.length; i++) {
+    if (LLM_API_PATH_PATTERNS[i].test(url)) return true;
+  }
+  return false;
+}
+
+/**
+ * 通过请求体内容特征判断是否为 LLM API 请求
+ * 检测 OpenAI/Anthropic 等标准格式的 messages 数组
+ */
+function isLlmRequestBody(reqBodyText) {
+  if (!reqBodyText) return false;
+  try {
+    var obj = JSON.parse(reqBodyText);
+    if (!obj || typeof obj !== "object") return false;
+
+    // OpenAI / Anthropic / 通用格式：包含 messages 数组且有 role 字段
+    if (Array.isArray(obj.messages) && obj.messages.length > 0) {
+      var firstMsg = obj.messages[0];
+      if (firstMsg && typeof firstMsg.role === "string") {
+        return true;
+      }
+    }
+
+    // 包含 model 字段 + prompt 字段（legacy completions 格式）
+    if (typeof obj.model === "string" && typeof obj.prompt === "string") {
+      return true;
+    }
+
+    // Google Gemini 格式：contents 数组
+    if (Array.isArray(obj.contents) && obj.contents.length > 0) {
+      var firstContent = obj.contents[0];
+      if (firstContent && Array.isArray(firstContent.parts)) {
+        return true;
+      }
+    }
+
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 综合判断一个 POST 请求是否为 LLM API 调用
+ * 策略：URL 路径匹配 OR 请求体结构匹配（双重保险）
+ */
+function detectLlmRequest(url, method, reqBodyText) {
+  // 只拦截 POST 请求
+  if (method !== "POST") return false;
+  // URL 路径特征匹配
+  if (isLlmApiUrl(url)) return true;
+  // 请求体结构特征匹配
+  if (isLlmRequestBody(reqBodyText)) return true;
+  return false;
+}
+
 // ─── 插件主体 ───
 
 var FETCH_WRAPPED_KEY = Symbol.for("tomzang_plungin.fetch-wrapped");
@@ -973,17 +1053,33 @@ var plugin = {
       var wrappedFetch = (async function wrappedFetch2(input, init) {
         var callId = ++fetchCallId;
         var url = getUrlFromFetchArgs(input);
+        var method = getMethodFromFetchArgs(input, init);
+        var reqBodyText = await getRequestBodyText(input, init);
+
+        // ─── 双重 LLM 检测：provider 匹配 + 智能识别 ───
         var providerUrls = getProviderBaseUrls(api.config);
         var matchedProvider = matchProviderByUrl(url, providerUrls);
+
+        // 如果 provider 没有匹配到，尝试通过请求特征智能识别
+        if (!matchedProvider) {
+          if (detectLlmRequest(url, method, reqBodyText)) {
+            // 构造一个虚拟 provider 标识，用于日志和后续处理
+            matchedProvider = { providerId: "_auto_detected", baseUrl: url };
+            logDebug("llm", "auto_detected", {
+              callId: callId,
+              url: url,
+              method: method,
+              message: "LLM request detected by URL/body heuristics (not in models.providers)"
+            });
+          }
+        }
 
         // 非 LLM 请求直接放行
         if (!matchedProvider) {
           return originalFetch(input, init);
         }
 
-        var method = getMethodFromFetchArgs(input, init);
         var reqHeaders = getMergedRequestHeaders(input, init);
-        var reqBodyText = await getRequestBodyText(input, init);
 
         logDebug("llm", "request", {
           callId: callId,
