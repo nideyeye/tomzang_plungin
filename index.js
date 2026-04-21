@@ -75,7 +75,7 @@ function logDebug(category, action, data) {
 
 var firewallCallId = 0;
 
-async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
+async function callFirewallApi(fetchFn, config, prompt, response, sessionId, stage) {
   var callId = ++firewallCallId;
   var traceId = "trace-" + Date.now() + "-" + callId;
   var requestBody = {
@@ -85,8 +85,8 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
     stage: stage || "input",
     content_type: "text",
     content: {
-      prompt: prompt,
-      response: "",
+      prompt: prompt || "",
+      response: response || "",
       image: ""
     }
   };
@@ -96,7 +96,8 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
     stage: stage,
     url: config.firewallUrl,
     requestBody: requestBody,
-    promptPreview: prompt || ""
+    promptPreview: prompt || "",
+    responsePreview: response ? response.slice(0, BODY_PREVIEW_MAX_LENGTH) : ""
   });
 
   try {
@@ -126,13 +127,26 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
 
     if (result && result.code === 200 && result.data) {
       var data = result.data;
+
+      // 提取 masked_content（脱敏内容）
+      var maskedContent = null;
+      if (data.masked_content && typeof data.masked_content === "object") {
+        maskedContent = {
+          prompt: data.masked_content.prompt || "",
+          response: data.masked_content.response || "",
+          image: data.masked_content.image || ""
+        };
+      }
+
       logDebug("firewall", "api_response", {
         callId: callId,
+        stage: stage,
         action: data.action,
         result: data.result,
         riskLevel: data.risk_level,
         violationReason: data.violation_reason,
         hitRules: data.hit_rules,
+        hasMaskedContent: !!maskedContent,
         durationMs: durationMs
       });
       return {
@@ -140,7 +154,8 @@ async function callFirewallApi(fetchFn, config, prompt, sessionId, stage) {
         result: data.result || "",
         riskLevel: data.risk_level || 0,
         violationReason: data.violation_reason || "",
-        hitRules: data.hit_rules || []
+        hitRules: data.hit_rules || [],
+        maskedContent: maskedContent
       };
     }
 
@@ -240,6 +255,27 @@ function stripTimestampPrefix(text) {
   // 匹配 [Mon 2026-04-20 18:08 GMT+8] 或 [2026-04-20 18:08:22 GMT+8] 等格式
   return text.replace(/^\[.*?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s+GMT[^\]]*\]\s*/, "");
 }
+
+
+// // 从OpenAI格式的请求体中提取最后一条用户输入内容
+// function extractLastUserPrompt(reqBodyText) {
+//   if (!reqBodyText) return "";
+//   try {
+//     var obj = JSON.parse(reqBodyText);
+//     if (obj && Array.isArray(obj.messages)) {
+//       for (var i = obj.messages.length - 1; i >= 0; i--) {
+//         var msg = obj.messages[i];
+//         if (msg.role === "user" && msg.content) {
+//           return typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+//         }
+//       }
+//       return "";
+//     }
+//     return reqBodyText.slice(0, 2000);
+//   } catch (e) {
+//     return reqBodyText.slice(0, 2000);
+//   }
+// }
 
 // 判断是否为内置命令（以 / 开头的指令，如 /reset, /help, /clear 等）
 function isBuiltInCommand(text) {
@@ -421,6 +457,418 @@ function makeBlockedResponseForRequest(wantsSse, replacementText) {
   return new Response(body2, { status: 200, headers: headers2 });
 }
 
+// 响应阶段拦截：伪造一个完整的 LLM 响应返回给客户端
+function makeBlockedResponseForOutput(streaming, replacementText) {
+  var id = "chatcmpl-tomzang-output-blocked";
+  if (streaming) {
+    var headers = new Headers({
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      "connection": "keep-alive",
+      "x-firewall-action": "blocked"
+    });
+    var body = buildOpenAiSseBodyFromText(replacementText, id);
+    return new Response(body, { status: 200, headers: headers });
+  }
+  var headers2 = new Headers({
+    "content-type": "application/json; charset=utf-8",
+    "x-firewall-action": "blocked"
+  });
+  var body2 = buildOpenAiJsonBodyFromText(replacementText, id);
+  return new Response(body2, { status: 200, headers: headers2 });
+}
+
+// ─── 输出内容提取与替换 ───
+
+// 从非流式 JSON 响应中提取助手回复文本（兼容 OpenAI / Anthropic / 通用格式）
+function extractAssistantTextFromJson(bodyText) {
+  try {
+    var obj = typeof bodyText === "string" ? JSON.parse(bodyText) : bodyText;
+
+    // OpenAI 格式: choices[0].message.content
+    if (obj.choices && obj.choices.length > 0) {
+      var choice = obj.choices[0];
+      if (choice.message && typeof choice.message.content === "string") {
+        return choice.message.content;
+      }
+      if (typeof choice.text === "string") {
+        return choice.text;
+      }
+    }
+
+    // Anthropic 格式: content[0].text
+    if (obj.content && Array.isArray(obj.content)) {
+      var texts = [];
+      for (var i = 0; i < obj.content.length; i++) {
+        if (obj.content[i].type === "text" && typeof obj.content[i].text === "string") {
+          texts.push(obj.content[i].text);
+        }
+      }
+      if (texts.length > 0) return texts.join("");
+    }
+
+    // 直接有 response / output 字段
+    if (typeof obj.response === "string") return obj.response;
+    if (typeof obj.output === "string") return obj.output;
+
+    return "";
+  } catch (e) {
+    return "";
+  }
+}
+
+/**
+ * 将非流式 JSON 响应体中的助手回复替换为脱敏后的文本
+ * 返回替换后的 JSON 字符串；如果替换失败则返回 null
+ */
+function replaceAssistantTextInJson(bodyText, maskedResponse) {
+  try {
+    var obj = JSON.parse(bodyText);
+
+    // OpenAI 格式: choices[0].message.content
+    if (obj.choices && obj.choices.length > 0) {
+      var choice = obj.choices[0];
+      if (choice.message && typeof choice.message.content === "string") {
+        choice.message.content = maskedResponse;
+        return JSON.stringify(obj);
+      }
+      if (typeof choice.text === "string") {
+        choice.text = maskedResponse;
+        return JSON.stringify(obj);
+      }
+    }
+
+    // Anthropic 格式: content[0].text（将所有 text block 合并替换到第一个，清空后续）
+    if (obj.content && Array.isArray(obj.content)) {
+      var replaced = false;
+      for (var i = 0; i < obj.content.length; i++) {
+        if (obj.content[i].type === "text" && typeof obj.content[i].text === "string") {
+          if (!replaced) {
+            obj.content[i].text = maskedResponse;
+            replaced = true;
+          } else {
+            obj.content[i].text = "";
+          }
+        }
+      }
+      if (replaced) return JSON.stringify(obj);
+    }
+
+    // 直接有 response / output 字段
+    if (typeof obj.response === "string") {
+      obj.response = maskedResponse;
+      return JSON.stringify(obj);
+    }
+    if (typeof obj.output === "string") {
+      obj.output = maskedResponse;
+      return JSON.stringify(obj);
+    }
+
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 从 SSE 流式响应的行数组中提取完整的助手回复文本
+function extractAssistantTextFromSseLines(lines) {
+  var fullText = "";
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (!line.startsWith("data: ")) continue;
+    var dataStr = line.slice(6).trim();
+    if (dataStr === "[DONE]") continue;
+    try {
+      var obj = JSON.parse(dataStr);
+      // OpenAI 流式格式: choices[0].delta.content
+      if (obj.choices && obj.choices.length > 0) {
+        var delta = obj.choices[0].delta;
+        if (delta && typeof delta.content === "string") {
+          fullText += delta.content;
+        }
+      }
+      // Anthropic 流式格式: delta.text
+      if (obj.delta && typeof obj.delta.text === "string") {
+        fullText += obj.delta.text;
+      }
+      // Anthropic content_block_delta
+      if (obj.type === "content_block_delta" && obj.delta && typeof obj.delta.text === "string") {
+        fullText += obj.delta.text;
+      }
+    } catch (e) {
+      // 解析失败跳过
+    }
+  }
+  return fullText;
+}
+
+/**
+ * 构建一个将脱敏内容作为完整 SSE 流返回的响应
+ * 复用原始流中第一个 chunk 的 id/model 等元信息，只替换内容
+ */
+function buildMaskedSseResponse(originalResp, allLines, maskedResponse) {
+  // 尝试从原始 SSE 行中提取 id 和 model
+  var originalId = "chatcmpl-tomzang-masked";
+  var originalModel = "tomzang-security";
+  for (var i = 0; i < allLines.length; i++) {
+    var line = allLines[i];
+    if (!line.startsWith("data: ")) continue;
+    var dataStr = line.slice(6).trim();
+    if (dataStr === "[DONE]") continue;
+    try {
+      var obj = JSON.parse(dataStr);
+      if (obj.id) originalId = obj.id;
+      if (obj.model) originalModel = obj.model;
+      break; // 只需要第一个
+    } catch (e) {}
+  }
+
+  var now = Math.floor(Date.now() / 1000);
+  var chunkObj = {
+    id: originalId,
+    object: "chat.completion.chunk",
+    created: now,
+    model: originalModel,
+    choices: [{ index: 0, delta: { content: maskedResponse }, finish_reason: null }]
+  };
+  var finishObj = {
+    id: originalId,
+    object: "chat.completion.chunk",
+    created: now,
+    model: originalModel,
+    choices: [{ index: 0, delta: { content: "" }, finish_reason: "stop" }]
+  };
+  var sseBody = "data: " + JSON.stringify(chunkObj) + "\n\ndata: " + JSON.stringify(finishObj) + "\n\ndata: [DONE]\n\n";
+
+  var headers = new Headers({
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache",
+    "connection": "keep-alive",
+    "x-firewall-action": "masked"
+  });
+  return new Response(sseBody, { status: 200, headers: headers });
+}
+
+// ─── 输出审计 ───
+
+// 判断防火墙返回结果是否需要对输出内容进行脱敏替换
+function shouldMaskOutput(fwResult) {
+  return fwResult.maskedContent
+    && typeof fwResult.maskedContent.response === "string"
+    && fwResult.maskedContent.response.length > 0;
+}
+
+// 对非流式 JSON 响应进行输出审计
+async function auditNonStreamingResponse(originalFetch, config, resp, userPrompt, sessionId, callId, url, matchedProvider) {
+  var bodyText;
+  try {
+    bodyText = await resp.text();
+  } catch (e) {
+    logWarn("firewall", "output_read_failed", { callId: callId, error: String(e && e.message || e) });
+    return resp; // 读取失败直接放行
+  }
+
+  var assistantText = extractAssistantTextFromJson(bodyText);
+
+  if (!assistantText) {
+    logDebug("firewall", "output_no_text", { callId: callId });
+    // 没有提取到文本，重建原始响应并放行
+    return new Response(bodyText, {
+      status: resp.status,
+      statusText: resp.statusText,
+      headers: resp.headers
+    });
+  }
+
+  logDebug("firewall", "output_audit_start", {
+    callId: callId,
+    assistantTextPreview: assistantText.slice(0, BODY_PREVIEW_MAX_LENGTH)
+  });
+
+  var fwResult = await callFirewallApi(
+    originalFetch, config, userPrompt, assistantText, sessionId, "output"
+  );
+
+  // 情况1：完全拦截
+  if (fwResult.result === "block") {
+    var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+    logInfo("llm", "output_blocked", {
+      callId: callId,
+      url: url,
+      provider: matchedProvider.providerId,
+      result: fwResult.result,
+      action: fwResult.action,
+      violationReason: fwResult.violationReason,
+      riskLevel: fwResult.riskLevel,
+      streaming: false
+    });
+    return makeBlockedResponseForOutput(false, blockMsg);
+  }
+
+  // 情况2：放行但需要脱敏替换（masked_content.response 存在且非空）
+  if (shouldMaskOutput(fwResult)) {
+    var maskedResponse = fwResult.maskedContent.response;
+    logInfo("llm", "output_masked", {
+      callId: callId,
+      url: url,
+      provider: matchedProvider.providerId,
+      result: fwResult.result,
+      riskLevel: fwResult.riskLevel,
+      hitRules: fwResult.hitRules,
+      originalPreview: assistantText.slice(0, BODY_PREVIEW_MAX_LENGTH),
+      maskedPreview: maskedResponse.slice(0, BODY_PREVIEW_MAX_LENGTH),
+      streaming: false
+    });
+
+    var replacedBody = replaceAssistantTextInJson(bodyText, maskedResponse);
+    if (replacedBody) {
+      var maskedHeaders = new Headers(resp.headers);
+      maskedHeaders.set("x-firewall-action", "masked");
+      return new Response(replacedBody, {
+        status: resp.status,
+        statusText: resp.statusText,
+        headers: maskedHeaders
+      });
+    }
+
+    // 替换失败（格式不支持），回退到直接构造完整响应
+    logWarn("firewall", "output_mask_replace_failed", { callId: callId });
+    var maskedHeaders2 = new Headers({
+      "content-type": "application/json; charset=utf-8",
+      "x-firewall-action": "masked"
+    });
+    var maskedBody = buildOpenAiJsonBodyFromText(maskedResponse, "chatcmpl-tomzang-masked");
+    return new Response(maskedBody, { status: 200, headers: maskedHeaders2 });
+  }
+
+  // 情况3：完全放行
+  logDebug("firewall", "output_audit_passed", { callId: callId });
+  return new Response(bodyText, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers: resp.headers
+  });
+}
+
+// 对流式 SSE 响应进行输出审计（缓冲全部内容后审计再决定输出）
+async function auditStreamingResponse(originalFetch, config, resp, userPrompt, sessionId, callId, url, matchedProvider) {
+  var reader = resp.body.getReader();
+  var decoder = new TextDecoder("utf-8");
+  var allChunksRaw = [];   // 存储原始二进制块
+  var allLines = [];        // 存储解析出的 SSE 行
+  var buffer = "";
+
+  try {
+    while (true) {
+      var readResult = await reader.read();
+      if (readResult.done) break;
+      var chunk = readResult.value;
+      allChunksRaw.push(chunk);
+      buffer += decoder.decode(chunk, { stream: true });
+
+      // 按行拆分
+      var lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // 最后一个可能不完整，留到下次
+      for (var i = 0; i < lines.length; i++) {
+        var trimmed = lines[i].trim();
+        if (trimmed) allLines.push(trimmed);
+      }
+    }
+    // 处理剩余 buffer
+    if (buffer.trim()) {
+      allLines.push(buffer.trim());
+    }
+  } catch (e) {
+    logWarn("firewall", "output_stream_read_failed", { callId: callId, error: String(e && e.message || e) });
+    // 读取失败，尽量把已读到的数据返回
+    return rebuildSseResponse(resp, allChunksRaw);
+  }
+
+  // 从 SSE 行中提取完整助手回复
+  var assistantText = extractAssistantTextFromSseLines(allLines);
+
+  if (!assistantText) {
+    logDebug("firewall", "output_stream_no_text", { callId: callId });
+    return rebuildSseResponse(resp, allChunksRaw);
+  }
+
+  logDebug("firewall", "output_stream_audit_start", {
+    callId: callId,
+    assistantTextPreview: assistantText.slice(0, BODY_PREVIEW_MAX_LENGTH)
+  });
+
+  var fwResult = await callFirewallApi(
+    originalFetch, config, userPrompt, assistantText, sessionId, "output"
+  );
+
+  // 情况1：完全拦截
+  if (fwResult.result === "block") {
+    var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+    logInfo("llm", "output_blocked", {
+      callId: callId,
+      url: url,
+      provider: matchedProvider.providerId,
+      result: fwResult.result,
+      action: fwResult.action,
+      violationReason: fwResult.violationReason,
+      riskLevel: fwResult.riskLevel,
+      streaming: true
+    });
+    return makeBlockedResponseForOutput(true, blockMsg);
+  }
+
+  // 情况2：放行但需要脱敏替换
+  if (shouldMaskOutput(fwResult)) {
+    var maskedResponse = fwResult.maskedContent.response;
+    logInfo("llm", "output_masked", {
+      callId: callId,
+      url: url,
+      provider: matchedProvider.providerId,
+      result: fwResult.result,
+      riskLevel: fwResult.riskLevel,
+      hitRules: fwResult.hitRules,
+      originalPreview: assistantText.slice(0, BODY_PREVIEW_MAX_LENGTH),
+      maskedPreview: maskedResponse.slice(0, BODY_PREVIEW_MAX_LENGTH),
+      streaming: true
+    });
+    return buildMaskedSseResponse(resp, allLines, maskedResponse);
+  }
+
+  // 情况3：完全放行
+  logDebug("firewall", "output_stream_audit_passed", { callId: callId });
+  return rebuildSseResponse(resp, allChunksRaw);
+}
+
+// 从已缓冲的原始块重建 SSE 响应
+function rebuildSseResponse(originalResp, rawChunks) {
+  var totalLength = 0;
+  for (var i = 0; i < rawChunks.length; i++) {
+    totalLength += rawChunks[i].byteLength;
+  }
+  var merged = new Uint8Array(totalLength);
+  var offset = 0;
+  for (var j = 0; j < rawChunks.length; j++) {
+    merged.set(rawChunks[j], offset);
+    offset += rawChunks[j].byteLength;
+  }
+
+  return new Response(merged, {
+    status: originalResp.status,
+    statusText: originalResp.statusText,
+    headers: originalResp.headers
+  });
+}
+
+// 输出审计入口：根据响应类型分发到对应的审计函数
+async function auditOutputResponse(originalFetch, config, resp, userPrompt, sessionId, callId, url, matchedProvider) {
+  var streaming = isSseResponse(resp);
+  if (streaming) {
+    return auditStreamingResponse(originalFetch, config, resp, userPrompt, sessionId, callId, url, matchedProvider);
+  } else {
+    return auditNonStreamingResponse(originalFetch, config, resp, userPrompt, sessionId, callId, url, matchedProvider);
+  }
+}
+
 // ─── Provider 匹配 ───
 
 var providerCache = { lastTouchedAt: undefined, providers: [] };
@@ -462,7 +910,7 @@ var BODY_PREVIEW_MAX_LENGTH = 500;
 var plugin = {
   id: "tomzang_plungin",
   name: "tomzang_plungin",
-  description: "A security plugin that validates user input through a firewall API to detect and block sensitive content.",
+  description: "A security plugin that validates user input and output through a firewall API to detect and block sensitive content.",
   configSchema: {
     type: "object",
     additionalProperties: false,
@@ -545,11 +993,11 @@ var plugin = {
           bodyPreview: reqBodyText ? reqBodyText.slice(0, BODY_PREVIEW_MAX_LENGTH) : ""
         });
 
-        // ─── 防火墙内容检测 ───
+        // ─── 输入防火墙内容检测 ───
         var userPrompt = extractLastUserPrompt(reqBodyText);
         if (userPrompt && !shouldSkipFirewall(userPrompt)) {
           var freshConfig = resolveConfig(api.pluginConfig);
-          var fwResult = await callFirewallApi(originalFetch, freshConfig, userPrompt, "session-openclaw", "input");
+          var fwResult = await callFirewallApi(originalFetch, freshConfig, userPrompt, "", "session-openclaw", "input");
           if (fwResult.result === "block") {
             var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
             logInfo("llm", "request_blocked", {
@@ -567,7 +1015,7 @@ var plugin = {
           }
         }
 
-        // 放行请求，获取响应
+        // ─── 放行请求，获取响应 ───
         var resp;
         var fetchStartTime = Date.now();
         try {
@@ -583,12 +1031,59 @@ var plugin = {
           throw e;
         }
 
+        var fetchDurationMs = Date.now() - fetchStartTime;
+
+        logDebug("llm", "response_received", {
+          callId: callId,
+          url: url,
+          provider: matchedProvider.providerId,
+          status: resp.status,
+          durationMs: fetchDurationMs
+        });
+
+        // ─── 输出防火墙内容检测 ───
+        // 仅对成功的 LLM 响应进行输出审计（非 2xx 状态码直接放行）
+        if (resp.ok && userPrompt && !shouldSkipFirewall(userPrompt)) {
+          var outputConfig = resolveConfig(api.pluginConfig);
+          try {
+            var auditedResp = await auditOutputResponse(
+              originalFetch,
+              outputConfig,
+              resp,
+              userPrompt,
+              "session-openclaw",
+              callId,
+              url,
+              matchedProvider
+            );
+
+            var fwAction = auditedResp.headers.get("x-firewall-action") || "passed";
+            logDebug("llm", "response_audited", {
+              callId: callId,
+              url: url,
+              provider: matchedProvider.providerId,
+              firewallAction: fwAction,
+              totalDurationMs: Date.now() - fetchStartTime
+            });
+
+            return auditedResp;
+          } catch (auditError) {
+            logError("firewall", "output_audit_error", {
+              callId: callId,
+              error: String(auditError && auditError.message || auditError)
+            });
+            // 输出审计异常时放行（注意：resp.body 可能已被消费，此时无法恢复）
+            // 正常情况下异常应在 auditOutputResponse 内部已处理并返回重建的响应
+            return resp;
+          }
+        }
+
         logDebug("llm", "response_passed", {
           callId: callId,
           url: url,
           provider: matchedProvider.providerId,
           status: resp.status,
-          durationMs: Date.now() - fetchStartTime
+          durationMs: fetchDurationMs
         });
 
         return resp;
@@ -600,37 +1095,6 @@ var plugin = {
       globalThis[FETCH_WRAPPED_KEY] = true;
       logDebug("init", "fetch_interceptor_installed", {});
     }
-
-    // ─── 工具调用审计：before_tool_call ───
-    api.on("before_tool_call", async function (event, ctx) {
-      try {
-        // 跳过内置命令和系统内部操作
-        if (shouldSkipFirewall(event.toolName)) return;
-        var toolInput = event.toolName;
-        if (event.params) {
-          toolInput += " " + (typeof event.params === "string"
-            ? event.params
-            : JSON.stringify(event.params));
-        }
-        var fwResult = await callFirewallApi(originalFetch, resolveConfig(api.pluginConfig), toolInput, "session-openclaw", "input");
-        if (fwResult.result === "block") {
-          logInfo("tool_call", "request_blocked", {
-            toolName: event.toolName,
-            violationReason: fwResult.violationReason,
-            riskLevel: fwResult.riskLevel,
-            hitRules: (fwResult.hitRules || []).map(function (r) { return r.rule_code + ": " + r.description; })
-          });
-          var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
-          return { block: true, blockReason: blockMsg };
-        }
-      } catch (e) {
-        logWarn("tool_call", "request_check_failed", {
-          toolName: event.toolName,
-          error: String(e && e.message || e)
-        });
-      }
-      return;
-    });
 
     // ─── 生命周期钩子（日志记录） ───
     api.on("before_prompt_build", async function (event, ctx) {
