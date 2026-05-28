@@ -19,7 +19,9 @@ function resolveConfig(rawConfig) {
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
-    debug: typeof cfg.debug === "boolean" ? cfg.debug : false
+    debug: typeof cfg.debug === "boolean" ? cfg.debug : false,
+    requireToolApproval: typeof cfg.requireToolApproval === "boolean" ? cfg.requireToolApproval : false,
+    toolsNeedingApproval: Array.isArray(cfg.toolsNeedingApproval) ? cfg.toolsNeedingApproval : []
   };
 }
 
@@ -998,7 +1000,9 @@ var plugin = {
       firewallUrl: { type: "string", description: "Firewall API host and port, e.g. http://localhost:8080 (required, path /api/firewall/openclaw/validate will be appended automatically)" },
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
-      debug: { type: "boolean", default: false, description: "Enable debug mode" }
+      debug: { type: "boolean", default: false, description: "Enable debug mode" },
+      requireToolApproval: { type: "boolean", default: false, description: "Require user approval before tool execution" },
+      toolsNeedingApproval: { type: "array", items: { type: "string" }, default: [], description: "List of tool names that require approval (empty means all tools)" }
     },
     required: ["firewallUrl", "authKey"]
   },
@@ -1007,6 +1011,14 @@ var plugin = {
     var config = resolveConfig(api.pluginConfig);
     currentLogger = api.logger;
     debugMode = config.debug;
+
+    // 强制输出初始化日志
+    logInfo("init", "plugin_loaded", {
+      firewallUrl: config.firewallUrl,
+      hasAuthKey: !!config.authKey,
+      debug: config.debug,
+      requireToolApproval: config.requireToolApproval
+    });
 
     // 检查必要配置
     var missingFields = validateConfig(config);
@@ -1222,8 +1234,75 @@ var plugin = {
       });
     });
 
+    // ─── 工具调用钩子 ───
+    api.on(
+      "before_tool_call",
+      async function (ctx) {
+      logDebug("tool", "before_call", {
+        agentId: ctx.agentId,
+        sessionKey: ctx.sessionKey,
+        sessionId: ctx.sessionId,
+        runId: ctx.runId,
+        toolName: ctx.toolName,
+        toolCallId: ctx.toolCallId,
+        params: ctx.params
+      });
+
+      // 工具执行确认
+      var toolApprovalConfig = config.requireToolApproval;
+      var toolsNeedingApproval = config.toolsNeedingApproval || [];
+      if (toolApprovalConfig) {
+        // 如果配置了特定工具列表，只检查列表中的工具；否则所有工具都需要确认
+        var needsApproval = toolsNeedingApproval.length === 0 || toolsNeedingApproval.indexOf(ctx.toolName) !== -1;
+        if (needsApproval) {
+          var reason = "执行工具: " + ctx.toolName;
+          if (ctx.params) {
+            var paramStr = typeof ctx.params === "string" ? ctx.params : JSON.stringify(ctx.params);
+            reason = reason + "\n参数: " + paramStr.slice(0, 500);
+            if (paramStr.length > 500) reason = reason + "...";
+          }
+          logDebug("tool", "requesting_approval", {
+            toolName: ctx.toolName,
+            reason: reason
+          });
+          // 使用 ctx.requireApproval() 自动选择消息渠道
+          return {
+            requireApproval :{
+              title: "二次确认",
+              description: reason,
+              serverity: "info",
+              timeoutMs:60_000,
+              timeoutBehavior: "deny",
+            }
+          }
+        }
+      }
+    });
+
+    api.on("after_tool_call", async function (ctx) {
+      logDebug("tool", "after_call", {
+        agentId: ctx.agentId,
+        sessionKey: ctx.sessionKey,
+        sessionId: ctx.sessionId,
+        runId: ctx.runId,
+        toolName: ctx.toolName,
+        toolCallId: ctx.toolCallId,
+        result: ctx.result,
+        error: ctx.error,
+        durationMs: ctx.durationMs
+      });
+    });
+
     logDebug("init", "hooks_registered", {});
   }
 };
 
-export default plugin;
+// 导出插件：如果 definePluginEntry 可用则使用它包装，否则直接导出
+var pluginEntry = typeof definePluginEntry !== "undefined"
+  ? definePluginEntry(plugin)
+  : plugin;
+
+// 调试日志：验证模块是否被加载
+console.log("[tomzang_plungin] Module loaded, pluginEntry:", pluginEntry ? (typeof definePluginEntry !== "undefined" ? "wrapped with definePluginEntry" : "direct export") : "FAILED");
+
+export default pluginEntry;
