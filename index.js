@@ -1237,7 +1237,7 @@ var plugin = {
     // ─── 工具调用钩子 ───
     api.on(
       "before_tool_call",
-      async function (ctx) {
+      async function (event, ctx) {
       logDebug("tool", "before_call", {
         agentId: ctx.agentId,
         sessionKey: ctx.sessionKey,
@@ -1255,6 +1255,12 @@ var plugin = {
         // 如果配置了特定工具列表，只检查列表中的工具；否则所有工具都需要确认
         var needsApproval = toolsNeedingApproval.length === 0 || toolsNeedingApproval.indexOf(ctx.toolName) !== -1;
         if (needsApproval) {
+          // 默认放行浏览器搜索和飞书 cli
+          const allowedTools = ["web_search", "lark-cli"];
+          if (allowedTools.includes(event.toolName)) {
+            logDebug("tool", "requesting_approval", "skip:match witelist");
+            return;
+          }
           var reason = "执行工具: " + ctx.toolName;
           if (ctx.params) {
             var paramStr = typeof ctx.params === "string" ? ctx.params : JSON.stringify(ctx.params);
