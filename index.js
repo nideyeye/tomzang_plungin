@@ -177,19 +177,86 @@ function extractLastUserPrompt(reqBodyText) {
   try {
     var obj = JSON.parse(reqBodyText);
     if (obj && Array.isArray(obj.messages)) {
+      logDebug("extract", "messages_structure", {
+        messagesCount: obj.messages.length,
+        messagesPreview: obj.messages.map(function (m, idx) {
+          return { idx: idx, role: m.role, contentType: typeof m.content, hasContent: !!m.content };
+        })
+      });
+
+      // 首先收集所有 user 消息的详细信息
+      var userMessages = [];
       for (var i = obj.messages.length - 1; i >= 0; i--) {
         var msg = obj.messages[i];
         if (msg.role === "user" && msg.content) {
           var raw = typeof msg.content === "string"
             ? msg.content
             : extractTextFromContentArray(msg.content);
-          return stripMetadataPrefix(raw);
+          var stripped = stripMetadataPrefix(raw);
+          userMessages.push({
+            idx: i,
+            rawLength: raw ? raw.length : 0,
+            rawPreview: raw ? raw.slice(0, 500) : "",
+            stripped: stripped,
+            strippedLength: stripped ? stripped.length : 0
+          });
         }
       }
+
+      logDebug("extract", "all_user_messages", {
+        count: userMessages.length,
+        messages: userMessages
+      });
+
+      // 从后往前找，优先选择包含真实用户输入的消息
+      // 策略：跳过以 "Sender (untrusted metadata):" 或 "Conversation info (untrusted metadata):" 开头的消息
+      for (var j = 0; j < userMessages.length; j++) {
+        var userInfo = userMessages[j];
+        var content = userInfo.stripped;
+
+        // 检查是否是元数据块（以特定前缀开头）
+        var isMetadata = content.indexOf("Sender (untrusted metadata):") === 0 ||
+                         content.indexOf("Conversation info (untrusted metadata):") === 0 ||
+                         content.indexOf("System:") === 0;
+
+        if (isMetadata) {
+          logDebug("extract", "skipped_metadata_block", {
+            idx: userInfo.idx,
+            strippedLength: userInfo.strippedLength,
+            reason: "content starts with metadata prefix",
+            preview: content.slice(0, 100)
+          });
+          continue;
+        }
+
+        // 如果不是元数据且有内容，选择这条消息
+        if (userInfo.strippedLength > 0) {
+          logDebug("extract", "selected_user_message", {
+            idx: userInfo.idx,
+            originalLength: userInfo.rawLength,
+            strippedLength: userInfo.strippedLength,
+            preview: userInfo.stripped.slice(0, 200)
+          });
+          return userInfo.stripped;
+        }
+      }
+
+      // 如果所有 user 消息都很短，返回最后一条
+      if (userMessages.length > 0) {
+        logDebug("extract", "using_last_user_message", {
+          idx: userMessages[0].idx,
+          content: userMessages[0].stripped
+        });
+        return userMessages[0].stripped;
+      }
+
+      logDebug("extract", "no_user_message_found", { messagesCount: obj.messages.length });
       return "";
     }
+    logDebug("extract", "not_messages_array", { bodyPreview: reqBodyText.slice(0, 500) });
     return reqBodyText.slice(0, 2000);
   } catch (e) {
+    logDebug("extract", "parse_error", { error: String(e), bodyPreview: reqBodyText.slice(0, 500) });
     return reqBodyText.slice(0, 2000);
   }
 }
@@ -258,26 +325,6 @@ function stripTimestampPrefix(text) {
   return text.replace(/^\[.*?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s+GMT[^\]]*\]\s*/, "");
 }
 
-
-// // 从OpenAI格式的请求体中提取最后一条用户输入内容
-// function extractLastUserPrompt(reqBodyText) {
-//   if (!reqBodyText) return "";
-//   try {
-//     var obj = JSON.parse(reqBodyText);
-//     if (obj && Array.isArray(obj.messages)) {
-//       for (var i = obj.messages.length - 1; i >= 0; i--) {
-//         var msg = obj.messages[i];
-//         if (msg.role === "user" && msg.content) {
-//           return typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-//         }
-//       }
-//       return "";
-//     }
-//     return reqBodyText.slice(0, 2000);
-//   } catch (e) {
-//     return reqBodyText.slice(0, 2000);
-//   }
-// }
 
 // 判断是否为内置命令（以 / 开头的指令，如 /reset, /help, /clear 等）
 function isBuiltInCommand(text) {
@@ -1102,7 +1149,22 @@ var plugin = {
         });
 
         // ─── 输入防火墙内容检测 ───
+        logDebug("llm", "request_body_analysis", {
+          callId: callId,
+          hasBody: !!reqBodyText,
+          bodyLength: reqBodyText ? reqBodyText.length : 0,
+          bodyPreview: reqBodyText ? reqBodyText.slice(0, 1000) : ""
+        });
+
         var userPrompt = extractLastUserPrompt(reqBodyText);
+
+        logDebug("llm", "extracted_user_prompt", {
+          callId: callId,
+          promptLength: userPrompt ? userPrompt.length : 0,
+          promptPreview: userPrompt ? userPrompt.slice(0, 500) : "",
+          shouldSkip: shouldSkipFirewall(userPrompt)
+        });
+
         if (userPrompt && !shouldSkipFirewall(userPrompt)) {
           var freshConfig = resolveConfig(api.pluginConfig);
           var fwResult = await callFirewallApi(originalFetch, freshConfig, userPrompt, "", "session-openclaw", "input");
@@ -1206,10 +1268,31 @@ var plugin = {
 
     // ─── 生命周期钩子（日志记录） ───
     api.on("before_prompt_build", async function (event, ctx) {
-      logDebug("hook", "before_prompt_build", {
+      logDebug("hook", "before_prompt_build_ctx", {
         agentId: ctx.agentId,
         sessionKey: ctx.sessionKey,
-        messagesCount: Array.isArray(event.messages) ? event.messages.length : 0
+        sessionId: ctx.sessionId,
+        runId: ctx.runId,
+        userId: ctx.userId,
+        userName: ctx.userName,
+        userAgent: ctx.userAgent,
+        ip: ctx.ip
+      });
+      logDebug("hook", "before_prompt_build_event", {
+        type: event.type,
+        hasMessages: !!event.messages,
+        messagesCount: Array.isArray(event.messages) ? event.messages.length : 0,
+        messagesPreview: Array.isArray(event.messages) ? event.messages.map(function (m, idx) {
+          return {
+            idx: idx,
+            role: m.role,
+            contentType: typeof m.content,
+            hasContent: !!m.content,
+            contentPreview: (typeof m.content === "string" ? m.content.slice(0, 200) : (Array.isArray(m.content) ? "[array length=" + m.content.length + "]" : "[object]"))
+          };
+        }) : [],
+        hasSystemPrompt: !!event.systemPrompt,
+        systemPromptLength: event.systemPrompt ? event.systemPrompt.length : 0
       });
     });
 
@@ -1238,33 +1321,40 @@ var plugin = {
     api.on(
       "before_tool_call",
       async function (event, ctx) {
-      logDebug("tool", "before_call", {
+      logDebug("tool", "before_call_ctx", {
         agentId: ctx.agentId,
         sessionKey: ctx.sessionKey,
         sessionId: ctx.sessionId,
         runId: ctx.runId,
         toolName: ctx.toolName,
-        toolCallId: ctx.toolCallId,
-        params: ctx.params
+        toolCallId: ctx.toolCallId
+      });
+      logDebug("tool", "before_call_event", {
+        toolName: event.toolName,
+        toolCallId: event.toolCallId,
+        hasParams: !!event.params,
+        paramsPreview: event.params ? JSON.stringify(event.params).slice(0, 500) : ""
+      });
+      logDebug("tool", "before_call_params", {
+        params: ctx.params || event.params
       });
 
       // 工具执行确认
       var toolApprovalConfig = config.requireToolApproval;
       var toolsNeedingApproval = config.toolsNeedingApproval || [];
       if (toolApprovalConfig) {
-        logDebug("tool", "requesting_approval", {
-            ctx: ctx,
-            event: event,
-            toolName: ctx.toolName,
-            reason: reason
-          });
+        logDebug("tool", "approval_check", {
+          requireToolApproval: toolApprovalConfig,
+          toolsNeedingApproval: toolsNeedingApproval,
+          toolName: ctx.toolName
+        });
         // 如果配置了特定工具列表，只检查列表中的工具；否则所有工具都需要确认
         var needsApproval = toolsNeedingApproval.length === 0 || toolsNeedingApproval.indexOf(ctx.toolName) !== -1;
         if (needsApproval) {
           // 默认放行浏览器搜索和飞书 cli
           const allowedTools = ["web_search", "lark-cli"];
           if (allowedTools.includes(event.toolName)) {
-            logDebug("tool", "requesting_approval", "skip:match witelist");
+            logDebug("tool", "approval_skipped_whitelist", { toolName: ctx.toolName });
             return;
           }
           var reason = "执行工具: " + ctx.toolName;
@@ -1273,6 +1363,10 @@ var plugin = {
             reason = reason + "\n参数: " + paramStr.slice(0, 500);
             if (paramStr.length > 500) reason = reason + "...";
           }
+          logDebug("tool", "requesting_approval", {
+            toolName: ctx.toolName,
+            reason: reason
+          });
           // 使用 ctx.requireApproval() 自动选择消息渠道
           return {
             requireApproval :{
@@ -1314,3 +1408,4 @@ var pluginEntry = typeof definePluginEntry !== "undefined"
 console.log("[tomzang_plungin] Module loaded, pluginEntry:", pluginEntry ? (typeof definePluginEntry !== "undefined" ? "wrapped with definePluginEntry" : "direct export") : "FAILED");
 
 export default pluginEntry;
+
