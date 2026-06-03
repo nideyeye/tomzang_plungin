@@ -1252,6 +1252,12 @@ var plugin = {
       var toolApprovalConfig = config.requireToolApproval;
       var toolsNeedingApproval = config.toolsNeedingApproval || [];
       if (toolApprovalConfig) {
+        logDebug("tool", "requesting_approval", {
+            ctx: ctx,
+            event: event,
+            toolName: ctx.toolName,
+            reason: reason
+          });
         // 如果配置了特定工具列表，只检查列表中的工具；否则所有工具都需要确认
         var needsApproval = toolsNeedingApproval.length === 0 || toolsNeedingApproval.indexOf(ctx.toolName) !== -1;
         if (needsApproval) {
@@ -1262,15 +1268,11 @@ var plugin = {
             return;
           }
           var reason = "执行工具: " + ctx.toolName;
-          if (ctx.params) {
-            var paramStr = typeof ctx.params === "string" ? ctx.params : JSON.stringify(ctx.params);
+          if (event.params) {
+            var paramStr = typeof event.params === "string" ? event.params : JSON.stringify(event.params);
             reason = reason + "\n参数: " + paramStr.slice(0, 500);
             if (paramStr.length > 500) reason = reason + "...";
           }
-          logDebug("tool", "requesting_approval", {
-            toolName: ctx.toolName,
-            reason: reason
-          });
           // 使用 ctx.requireApproval() 自动选择消息渠道
           return {
             requireApproval :{
