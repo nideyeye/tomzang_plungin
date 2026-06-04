@@ -1407,5 +1407,5 @@ var pluginEntry = typeof definePluginEntry !== "undefined"
 // 调试日志：验证模块是否被加载
 console.log("[tomzang_plungin] Module loaded, pluginEntry:", pluginEntry ? (typeof definePluginEntry !== "undefined" ? "wrapped with definePluginEntry" : "direct export") : "FAILED");
 
-export default pluginEntry;
+module.exports = pluginEntry;
 
