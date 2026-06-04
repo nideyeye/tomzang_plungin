@@ -2,7 +2,6 @@
   "name": "tomzang_plungin",
   "version": "2.0.0",
   "description": "A security plugin that validates user input through a firewall API to detect and block sensitive content.",
-  "type": "module",
   "license": "Apache-2.0",
   "keywords": [
     "openclaw",
