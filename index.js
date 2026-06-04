@@ -19,9 +19,7 @@ function resolveConfig(rawConfig) {
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
-    debug: typeof cfg.debug === "boolean" ? cfg.debug : false,
-    requireToolApproval: typeof cfg.requireToolApproval === "boolean" ? cfg.requireToolApproval : false,
-    toolsNeedingApproval: Array.isArray(cfg.toolsNeedingApproval) ? cfg.toolsNeedingApproval : []
+    debug: typeof cfg.debug === "boolean" ? cfg.debug : false
   };
 }
 
@@ -77,7 +75,7 @@ function logDebug(category, action, data) {
 
 var firewallCallId = 0;
 
-async function callFirewallApi(fetchFn, config, prompt, response, sessionId, stage) {
+async function callFirewallApi(fetchFn, config, prompt, response, sessionId, stage, source) {
   var callId = ++firewallCallId;
   var traceId = "trace-" + Date.now() + "-" + callId;
   var requestBody = {
@@ -85,6 +83,7 @@ async function callFirewallApi(fetchFn, config, prompt, response, sessionId, sta
     session_id: sessionId || "session-openclaw",
     trace_id: traceId,
     stage: stage || "input",
+    source: source || "user_prompt",
     content_type: "text",
     content: {
       prompt: prompt || "",
@@ -1047,9 +1046,7 @@ var plugin = {
       firewallUrl: { type: "string", description: "Firewall API host and port, e.g. http://localhost:8080 (required, path /api/firewall/openclaw/validate will be appended automatically)" },
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
-      debug: { type: "boolean", default: false, description: "Enable debug mode" },
-      requireToolApproval: { type: "boolean", default: false, description: "Require user approval before tool execution" },
-      toolsNeedingApproval: { type: "array", items: { type: "string" }, default: [], description: "List of tool names that require approval (empty means all tools)" }
+      debug: { type: "boolean", default: false, description: "Enable debug mode" }
     },
     required: ["firewallUrl", "authKey"]
   },
@@ -1063,8 +1060,7 @@ var plugin = {
     logInfo("init", "plugin_loaded", {
       firewallUrl: config.firewallUrl,
       hasAuthKey: !!config.authKey,
-      debug: config.debug,
-      requireToolApproval: config.requireToolApproval
+      debug: config.debug
     });
 
     // 检查必要配置
@@ -1339,44 +1335,90 @@ var plugin = {
         params: ctx.params || event.params
       });
 
-      // 工具执行确认
-      var toolApprovalConfig = config.requireToolApproval;
-      var toolsNeedingApproval = config.toolsNeedingApproval || [];
-      if (toolApprovalConfig) {
-        logDebug("tool", "approval_check", {
-          requireToolApproval: toolApprovalConfig,
-          toolsNeedingApproval: toolsNeedingApproval,
+      // 工具调用防火墙检查（默认启用）
+      // 默认放行浏览器搜索和飞书 cli
+      const allowedTools = ["web_search", "lark-cli"];
+      if (allowedTools.includes(event.toolName)) {
+        logDebug("tool", "approval_skipped_whitelist", { toolName: ctx.toolName });
+        return;
+      }
+
+      // 通过防火墙 API 判断工具调用是否需要拦截
+      var paramsText = "";
+      if (event.params) {
+        paramsText = typeof event.params === "string" ? event.params : JSON.stringify(event.params);
+      }
+
+      logDebug("tool", "firewall_tool_guard_check", {
+        toolName: ctx.toolName,
+        hasParams: !!paramsText,
+        paramsPreview: paramsText ? paramsText.slice(0, 500) : ""
+      });
+
+      // 调用防火墙 API 验证工具调用
+      var fwCheckResult = await callFirewallApi(
+        originalFetch,
+        config,
+        paramsText,
+        "",
+        "session-openclaw",
+        "input",
+        "tool_call"
+      );
+
+      logDebug("tool", "firewall_tool_guard_check_result", {
+        toolName: ctx.toolName,
+        action: fwCheckResult.action,
+        riskLevel: fwCheckResult.riskLevel,
+        violationReason: fwCheckResult.violationReason
+      });
+
+      // 根据 action 判断：block 直接终止，pass 直接放行，其他需要二次确认
+      if (fwCheckResult.action === "block") {
+        var blockMsg = buildBlockMessageFromHitRules(fwCheckResult.hitRules);
+        logInfo("tool", "call_blocked", {
+          toolName: ctx.toolName,
+          action: fwCheckResult.action,
+          violationReason: fwCheckResult.violationReason,
+          riskLevel: fwCheckResult.riskLevel
+        });
+        // 返回错误结果阻止工具执行
+        return {
+          result: { error: "工具调用已被安全组件拦截:\n\n" + blockMsg }
+        };
+      }
+
+      // action 为 pass，直接放行，不需要用户审批
+      if (fwCheckResult.action === "pass") {
+        logDebug("tool", "call_passed", {
           toolName: ctx.toolName
         });
-        // 如果配置了特定工具列表，只检查列表中的工具；否则所有工具都需要确认
-        var needsApproval = toolsNeedingApproval.length === 0 || toolsNeedingApproval.indexOf(ctx.toolName) !== -1;
-        if (needsApproval) {
-          // 默认放行浏览器搜索和飞书 cli
-          const allowedTools = ["web_search", "lark-cli"];
-          if (allowedTools.includes(event.toolName)) {
-            logDebug("tool", "approval_skipped_whitelist", { toolName: ctx.toolName });
-            return;
-          }
-          var reason = "执行工具: " + ctx.toolName;
-          if (event.params) {
-            var paramStr = typeof event.params === "string" ? event.params : JSON.stringify(event.params);
-            reason = reason + "\n参数: " + paramStr.slice(0, 500);
-            if (paramStr.length > 500) reason = reason + "...";
-          }
-          logDebug("tool", "requesting_approval", {
-            toolName: ctx.toolName,
-            reason: reason
-          });
-          // 使用 ctx.requireApproval() 自动选择消息渠道
-          return {
-            requireApproval :{
-              title: "二次确认",
-              description: reason,
-              serverity: "info",
-              timeoutMs:60_000,
-              timeoutBehavior: "deny",
-            }
-          }
+        return; // 放行，继续执行工具
+      }
+
+      // action 为其他值（如 review、warn 等），需要用户二次确认
+      var reason = "执行工具: " + ctx.toolName;
+      if (paramsText) {
+        reason = reason + "\n参数: " + paramsText.slice(0, 500);
+        if (paramsText.length > 500) reason = reason + "...";
+      }
+      // 添加风险提示
+      if (fwCheckResult.violationReason) {
+        reason = reason + "\n\n风险提示: " + fwCheckResult.violationReason;
+      }
+      logDebug("tool", "requesting_approval", {
+        toolName: ctx.toolName,
+        action: fwCheckResult.action,
+        reason: reason
+      });
+      // 使用 ctx.requireApproval() 自动选择消息渠道
+      return {
+        requireApproval :{
+          title: "二次确认",
+          description: reason,
+          serverity: "warn",
+          timeoutMs: 60_000,
+          timeoutBehavior: "deny",
         }
       }
     });
