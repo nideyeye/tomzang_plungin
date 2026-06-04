@@ -1,7 +1,20 @@
 {
   "id": "tomzang_plungin",
   "name": "tomzang_plungin Plugin",
-  "description": "A security plugin that validates user input through a firewall API to detect and block sensitive content.",
+  "description": "A security plugin that validates user input and output through a firewall API to detect and block sensitive content. Also supports tool execution approval.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "hooks": [
+      "before_prompt_build",
+      "before_agent_start",
+      "session_start",
+      "session_end",
+      "before_tool_call",
+      "after_tool_call"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -21,6 +34,15 @@
       "debug": {
         "type": "boolean",
         "description": "Enable debug mode for detailed logging (default: false)"
+      },
+      "requireToolApproval": {
+        "type": "boolean",
+        "description": "Require user approval before tool execution (default: false)"
+      },
+      "toolsNeedingApproval": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "List of tool names that require approval (empty array means all tools require approval)"
       }
     },
     "required": ["firewallUrl", "authKey"]

@@ -12,6 +12,9 @@ GITHUB_PAGE="https://github.com/${GITHUB_REPO}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 TMP_DIR="$(mktemp -d -t ${PLUGIN_ID}.XXXXXX)"
 
+# 记录本次运行产生的配置文件备份路径, 便于在重启失败时提示用户手动还原
+CONFIG_FILE_BACKUP=""
+
 # -------- 工具函数 --------
 log()  { printf '[%s] [INFO]  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 warn() { printf '[%s] [WARN]  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
@@ -258,15 +261,8 @@ install_via_github() {
   src_root="$(locate_plugin_root "${TMP_DIR}/extracted")" || return 1
   log "插件源目录: ${src_root}"
 
-  # 备份已存在的插件目录
-  if [[ -d "${PLUGIN_DIR}" ]]; then
-    local ts backup
-    ts="$(date '+%Y%m%d_%H%M%S')"
-    backup="${PLUGIN_DIR}.bak.${ts}"
-    mv "${PLUGIN_DIR}" "${backup}"
-    log "已备份原插件目录到: ${backup}"
-  fi
-
+  # 清理并重新部署插件目录
+  rm -rf "${PLUGIN_DIR}"
   mkdir -p "${PLUGIN_DIR}"
   cp -R "${src_root}/." "${PLUGIN_DIR}/"
   log "插件文件已部署到: ${PLUGIN_DIR}"
@@ -284,6 +280,7 @@ write_config_file() {
     ts="$(date '+%Y%m%d_%H%M%S')"
     backup="${CONFIG_FILE}.bak.${ts}"
     cp "${CONFIG_FILE}" "${backup}"
+    CONFIG_FILE_BACKUP="${backup}"
     log "已备份原配置到: ${backup}"
   fi
 
@@ -365,18 +362,76 @@ EOF
   fi
 }
 
+# -------- 重启 gateway, 并在失败时输出日志 + 备份路径 --------
+print_backup_hint() {
+  if [[ -n "${CONFIG_FILE_BACKUP}" ]]; then
+    warn "如需手动恢复配置, 可使用本次安装前自动创建的备份:"
+    warn "  - 配置文件备份: ${CONFIG_FILE_BACKUP}"
+    warn "    还原命令: cp '${CONFIG_FILE_BACKUP}' '${CONFIG_FILE}'"
+  fi
+}
+
+restart_gateway() {
+  if [[ "${HAS_OPENCLAW}" -ne 1 ]]; then
+    warn "未检测到 openclaw 命令, 跳过自动重启, 请稍后手动执行: openclaw gateway restart"
+    return 0
+  fi
+
+  log "尝试自动重启 gateway: openclaw gateway restart"
+  local restart_log="${TMP_DIR}/gateway_restart.log"
+  if openclaw gateway restart >"${restart_log}" 2>&1; then
+    log "gateway 重启成功"
+    # 将重启输出打印出来便于确认
+    if [[ -s "${restart_log}" ]]; then
+      while IFS= read -r line; do
+        log "  ${line}"
+      done <"${restart_log}"
+    fi
+    return 0
+  fi
+
+  err "gateway 重启失败, 以下为失败日志:"
+  if [[ -s "${restart_log}" ]]; then
+    while IFS= read -r line; do
+      err "  ${line}"
+    done <"${restart_log}"
+  else
+    err "  (无输出)"
+  fi
+  err "请稍后手动执行: openclaw gateway restart"
+  print_backup_hint
+  return 1
+}
+
 # -------- 主流程 --------
 main() {
+  # Step 0: 先卸载旧版本（如果存在）
+  log "检查并卸载旧版本 ${PLUGIN_ID}"
+  if [[ "${HAS_OPENCLAW}" -eq 1 ]]; then
+    openclaw plugins uninstall "${CLAWHUB_REF}" >/dev/null 2>&1 || true
+    log "已尝试通过 CLI 卸载旧版本"
+  fi
+  # 无论 CLI 是否成功，都执行手动清理确保干净
+  if [[ -d "${PLUGIN_DIR}" ]]; then
+    rm -rf "${PLUGIN_DIR}"
+    log "已清理旧插件目录"
+  fi
+
   log "开始安装 ${PLUGIN_ID}"
   log "目标目录: ${PLUGIN_DIR}"
 
   local install_ok=0
   local config_done_by_cli=0
 
+  # Step 0: 先写入配置文件（因为 openclaw plugins install 会验证 required 字段）
+  # 这样可以避免安装时因缺少必填配置而失败
+  log "预写入配置以通过安装验证"
+  write_config_file
+
   # Step 1: 优先使用 openclaw CLI 安装
   if install_via_openclaw; then
     install_ok=1
-    # 安装成功后, 继续尝试用 CLI 完成配置
+    # 安装成功后, 尝试用 CLI 更新配置（可能已有额外配置）
     if config_via_openclaw; then
       config_done_by_cli=1
     fi
@@ -392,7 +447,7 @@ main() {
     install_ok=1
   fi
 
-  # Step 3: 若 CLI 未能完成配置, 直接写配置文件
+  # Step 3: 确保配置正确写入（CLI 安装可能会覆盖配置）
   if [[ "${config_done_by_cli}" -ne 1 ]]; then
     write_config_file
   fi
@@ -403,7 +458,12 @@ main() {
     write_config_file
   fi
 
-  log "${PLUGIN_ID} 安装完成, 请运行: openclaw gateway restart 以使配置生效"
+  log "${PLUGIN_ID} 安装完成"
+
+  # Step 5: 自动重启 gateway 以使配置生效, 失败时输出日志与备份路径
+  if ! restart_gateway; then
+    exit 4
+  fi
 }
 
 main "$@"
