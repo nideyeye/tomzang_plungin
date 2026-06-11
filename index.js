@@ -411,23 +411,36 @@ function headersToRecord(headers) {
 
 // ─── 拦截提示语生成 ───
 
-// 从防火墙返回的 hit_rules 中提取 rule_name 和 description，生成 markdown 表格
+// 从防火墙返回的 hit_rules 中提取详细信息，生成 markdown 表格
 function buildBlockMessageFromHitRules(hitRules) {
   if (!Array.isArray(hitRules) || hitRules.length === 0) {
     return DEFAULT_BLOCK_MESSAGE;
   }
   var lines = [
-    "**当前请求已被安全组件拦截，命中以下规则：**",
-    "| rule_code | rule_name | description |",
-    "| --- | --- | --- |"
+    "**⛔ 当前请求已被安全组件拦截，命中以下规则：**",
+    "",
+    "| 规则代码 | 规则名称 | 风险等级 | 描述 | AIA分类 |",
+    "| --- | --- | ---: | --- | --- |"
   ];
   for (var i = 0; i < hitRules.length; i++) {
     var rule = hitRules[i];
     var code = rule.rule_code || "-";
     var name = rule.rule_name || "-";
+    var riskLevel = rule.risk_level !== undefined ? rule.risk_level : "-";
     var desc = rule.description || "-";
-    lines.push("| " + code + " | " + name + " | " + desc + " |");
+    var aiaName = rule.aia_name || "-";
+
+    // 风险等级显示为 emoji
+    var riskEmoji = "";
+    if (riskLevel >= 3) riskEmoji = "🔴";
+    else if (riskLevel === 2) riskEmoji = "🟠";
+    else if (riskLevel === 1) riskEmoji = "🟡";
+    else riskEmoji = "⚪";
+
+    lines.push("| " + code + " | " + name + " | " + riskEmoji + " " + riskLevel + " | " + desc + " | " + aiaName + " |");
   }
+  lines.push("");
+  lines.push("**如需继续操作，请联系管理员或调整请求内容。**");
   return lines.join("\n");
 }
 
@@ -1052,7 +1065,16 @@ var plugin = {
   },
 
   register: function (api) {
-    var config = resolveConfig(api.pluginConfig);
+    // 使用 api.runtime.config.current() 获取当前配置（替代已弃用的 api.pluginConfig）
+    var getPluginConfig = function () {
+      try {
+        var runtimeConfig = api.runtime.config.current();
+        return runtimeConfig.plugins.entries[plugin.id].config || {};
+      } catch (e) {
+        return {};
+      }
+    };
+    var config = resolveConfig(getPluginConfig());
     currentLogger = api.logger;
     debugMode = config.debug;
 
@@ -1162,7 +1184,7 @@ var plugin = {
         });
 
         if (userPrompt && !shouldSkipFirewall(userPrompt)) {
-          var freshConfig = resolveConfig(api.pluginConfig);
+          var freshConfig = resolveConfig(getPluginConfig());
           var fwResult = await callFirewallApi(originalFetch, freshConfig, userPrompt, "", "session-openclaw", "input");
           if (fwResult.result === "block") {
             var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
@@ -1210,7 +1232,7 @@ var plugin = {
         // ─── 输出防火墙内容检测 ───
         // 仅对成功的 LLM 响应进行输出审计（非 2xx 状态码直接放行）
         if (resp.ok && userPrompt && !shouldSkipFirewall(userPrompt)) {
-          var outputConfig = resolveConfig(api.pluginConfig);
+          var outputConfig = resolveConfig(getPluginConfig());
           try {
             var auditedResp = await auditOutputResponse(
               originalFetch,
@@ -1382,9 +1404,10 @@ var plugin = {
           violationReason: fwCheckResult.violationReason,
           riskLevel: fwCheckResult.riskLevel
         });
-        // 返回错误结果阻止工具执行
+        // 返回 block: true 阻止工具执行
         return {
-          result: { error: "工具调用已被安全组件拦截:\n\n" + blockMsg }
+          block: true,
+          blockReason: blockMsg
         };
       }
 
@@ -1413,14 +1436,14 @@ var plugin = {
       });
       // 使用 ctx.requireApproval() 自动选择消息渠道
       return {
-        requireApproval :{
+        requireApproval: {
           title: "二次确认",
           description: reason,
-          serverity: "warn",
+          severity: "warn",
           timeoutMs: 60_000,
-          timeoutBehavior: "deny",
+          timeoutBehavior: "deny"
         }
-      }
+      };
     });
 
     api.on("after_tool_call", async function (ctx) {
