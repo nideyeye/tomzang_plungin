@@ -34,15 +34,6 @@
       "debug": {
         "type": "boolean",
         "description": "Enable debug mode for detailed logging (default: false)"
-      },
-      "requireToolApproval": {
-        "type": "boolean",
-        "description": "Require user approval before tool execution (default: false)"
-      },
-      "toolsNeedingApproval": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "List of tool names that require approval (empty array means all tools require approval)"
       }
     },
     "required": ["firewallUrl", "authKey"]
