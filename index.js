@@ -19,7 +19,7 @@ function resolveConfig(rawConfig) {
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
-    debug: typeof cfg.debug === "boolean" ? cfg.debug : false
+    debug: typeof cfg.debug === "boolean" ? cfg.debug : true  // 默认开启 debug
   };
 }
 
@@ -285,12 +285,34 @@ function extractTextFromContentArray(contentArray) {
  *   1. System: [...] Feishu[...] DM | ...\n\n
  *   2. Conversation info (untrusted metadata):\n```json\n{...}\n```\n\n
  *   3. Sender (untrusted metadata):\n```json\n{...}\n```\n\n
+ *   4. 飞书消息格式：
+ *      [message_id: om_xxx]
+ *      ou_xxx: 实际消息内容
  *
- * 策略：找到最后一个 ``` 代码块结束标记后面的内容；
+ * 策略：先处理飞书格式，再找最后一个 ``` 代码块结束标记后面的内容；
  *       再去掉可能的时间戳行前缀 [Mon 2026-04-20 18:08 GMT+8]
  */
 function stripMetadataPrefix(text) {
   if (!text || typeof text !== "string") return text || "";
+
+  // 处理飞书消息格式：[message_id: xxx]\nou_xxx: 实际内容
+  var feishuPattern = /^\[message_id:\s*[^\]]+\][\s\S]*?^([a-z]+_\w+):\s*/m;
+  var feishuMatch = text.match(feishuPattern);
+  if (feishuMatch) {
+    // 提取用户 ID 后面的内容
+    var afterUserId = text.substring(feishuMatch[0].length);
+    // 去除可能的多余空格和换行
+    var stripped = afterUserId.replace(/^\s+/, "").replace(/\s+$/, "");
+    if (stripped.length > 0) {
+      logDebug("extract", "feishu_format_stripped", {
+        userId: feishuMatch[1],
+        originalLength: text.length,
+        strippedLength: stripped.length,
+        preview: stripped.slice(0, 100)
+      });
+      return stripTimestampPrefix(stripped).trim();
+    }
+  }
 
   // 找最后一个 ``` 标记的位置（元数据代码块的结束）
   var lastFence = text.lastIndexOf("```");
@@ -1059,13 +1081,17 @@ var plugin = {
       firewallUrl: { type: "string", description: "Firewall API host and port, e.g. http://localhost:8080 (required, path /api/firewall/openclaw/validate will be appended automatically)" },
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
-      debug: { type: "boolean", default: false, description: "Enable debug mode" }
+      debug: { type: "boolean", default: true, description: "Enable debug mode (enabled by default for troubleshooting)" }
     },
     required: ["firewallUrl", "authKey"]
   },
 
   register: function (api) {
-    // 使用 api.runtime.config.current() 获取当前配置（替代已弃用的 api.pluginConfig）
+    // 保存全局 API 引用，用于在拦截器中访问配置
+    globalApi = api;
+    currentLogger = api.logger;
+
+    // 使用 api.runtime.config.current() 获取当前配置
     var getPluginConfig = function () {
       try {
         var runtimeConfig = api.runtime.config.current();
@@ -1075,287 +1101,60 @@ var plugin = {
       }
     };
     var config = resolveConfig(getPluginConfig());
-    currentLogger = api.logger;
+
+    // 更新全局配置
+    globalConfig = config;
     debugMode = config.debug;
 
     // 强制输出初始化日志
-    logInfo("init", "plugin_loaded", {
+    console.log("[tomzang_plungin] Plugin registered with config:", {
       firewallUrl: config.firewallUrl,
       hasAuthKey: !!config.authKey,
-      debug: config.debug
+      debug: config.debug,
+      interceptorInstalled: interceptorInstalled
     });
 
     // 检查必要配置
     var missingFields = validateConfig(config);
     if (missingFields.length > 0) {
-      logError("init", "missing_required_config", {
-        missing: missingFields,
-        message: "插件缺少必要配置项: " + missingFields.join(", ") + "。请在 openclaw.json 的 plugins.entries.tomzang_plungin.config 中配置这些字段。"
-      });
-      // 仍然注册生命周期钩子（仅日志），但不注册防火墙拦截
+      console.log("[tomzang_plungin] ERROR: Missing required config:", missingFields);
+      console.log("[tomzang_plungin] Firewall checks will be disabled. Please configure:", missingFields.join(", "));
+      // 即使配置缺失，也注册钩子用于日志
       api.on("before_prompt_build", async function (event, ctx) {
-        logDebug("hook", "before_prompt_build", { agentId: ctx.agentId, sessionKey: ctx.sessionKey });
+        console.log("[tomzang_plungin] [hook] before_prompt_build agentId=" + ctx.agentId);
       });
       api.on("session_start", async function (event, ctx) {
-        logDebug("hook", "session_start", { agentId: ctx.agentId, sessionId: event.sessionId });
+        console.log("[tomzang_plungin] [hook] session_start agentId=" + ctx.agentId);
       });
       api.on("session_end", async function (event, ctx) {
-        logDebug("hook", "session_end", { agentId: ctx.agentId, sessionId: event.sessionId });
+        console.log("[tomzang_plungin] [hook] session_end agentId=" + ctx.agentId);
       });
       return;
     }
 
-    logDebug("init", "register", {
-      firewallUrl: config.firewallUrl,
-      blockMessage: config.blockMessage,
-      debug: config.debug
-    });
-
-    // 保存原始 fetch
-    if (!globalThis[ORIGINAL_FETCH_KEY] && globalThis.fetch) {
-      globalThis[ORIGINAL_FETCH_KEY] = globalThis.fetch;
-    }
-    var originalFetch = globalThis[ORIGINAL_FETCH_KEY];
-    if (!originalFetch) {
-      logError("init", "fetch_unavailable", { message: "globalThis.fetch is not available" });
-      return;
-    }
-
-    // 防止重复包装
-    var alreadyWrapped = globalThis[FETCH_WRAPPED_KEY];
-    if (alreadyWrapped) {
-      logDebug("init", "skip_double_wrap", {});
-    } else {
-      var fetchCallId = 0;
-      var wrappedFetch = (async function wrappedFetch2(input, init) {
-        var callId = ++fetchCallId;
-        var url = getUrlFromFetchArgs(input);
-        var method = getMethodFromFetchArgs(input, init);
-        var reqBodyText = await getRequestBodyText(input, init);
-
-        // ─── 双重 LLM 检测：provider 匹配 + 智能识别 ───
-        var providerUrls = getProviderBaseUrls(api.config);
-        var matchedProvider = matchProviderByUrl(url, providerUrls);
-
-        // 如果 provider 没有匹配到，尝试通过请求特征智能识别
-        if (!matchedProvider) {
-          if (detectLlmRequest(url, method, reqBodyText)) {
-            // 构造一个虚拟 provider 标识，用于日志和后续处理
-            matchedProvider = { providerId: "_auto_detected", baseUrl: url };
-            logDebug("llm", "auto_detected", {
-              callId: callId,
-              url: url,
-              method: method,
-              message: "LLM request detected by URL/body heuristics (not in models.providers)"
-            });
-          }
-        }
-
-        // 非 LLM 请求直接放行
-        if (!matchedProvider) {
-          return originalFetch(input, init);
-        }
-
-        var reqHeaders = getMergedRequestHeaders(input, init);
-
-        logDebug("llm", "request", {
-          callId: callId,
-          url: url,
-          provider: matchedProvider.providerId,
-          method: method,
-          bodyPreview: reqBodyText ? reqBodyText.slice(0, BODY_PREVIEW_MAX_LENGTH) : ""
-        });
-
-        // ─── 输入防火墙内容检测 ───
-        logDebug("llm", "request_body_analysis", {
-          callId: callId,
-          hasBody: !!reqBodyText,
-          bodyLength: reqBodyText ? reqBodyText.length : 0,
-          bodyPreview: reqBodyText ? reqBodyText.slice(0, 1000) : ""
-        });
-
-        var userPrompt = extractLastUserPrompt(reqBodyText);
-
-        logDebug("llm", "extracted_user_prompt", {
-          callId: callId,
-          promptLength: userPrompt ? userPrompt.length : 0,
-          promptPreview: userPrompt ? userPrompt.slice(0, 500) : "",
-          shouldSkip: shouldSkipFirewall(userPrompt)
-        });
-
-        if (userPrompt && !shouldSkipFirewall(userPrompt)) {
-          var freshConfig = resolveConfig(getPluginConfig());
-          var fwResult = await callFirewallApi(originalFetch, freshConfig, userPrompt, "", "session-openclaw", "input");
-          if (fwResult.result === "block") {
-            var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
-            logInfo("llm", "request_blocked", {
-              callId: callId,
-              url: url,
-              provider: matchedProvider.providerId,
-              result: fwResult.result,
-              action: fwResult.action,
-              violationReason: fwResult.violationReason,
-              riskLevel: fwResult.riskLevel,
-              streaming: wantsSse
-            });
-            var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
-            return makeBlockedResponseForRequest(wantsSse, blockMsg);
-          }
-        }
-
-        // ─── 放行请求，获取响应 ───
-        var resp;
-        var fetchStartTime = Date.now();
-        try {
-          resp = await originalFetch(input, init);
-        } catch (e) {
-          logError("fetch", "error", {
-            callId: callId,
-            url: url,
-            provider: matchedProvider.providerId,
-            error: String(e && e.message || e),
-            durationMs: Date.now() - fetchStartTime
-          });
-          throw e;
-        }
-
-        var fetchDurationMs = Date.now() - fetchStartTime;
-
-        logDebug("llm", "response_received", {
-          callId: callId,
-          url: url,
-          provider: matchedProvider.providerId,
-          status: resp.status,
-          durationMs: fetchDurationMs
-        });
-
-        // ─── 输出防火墙内容检测 ───
-        // 仅对成功的 LLM 响应进行输出审计（非 2xx 状态码直接放行）
-        if (resp.ok && userPrompt && !shouldSkipFirewall(userPrompt)) {
-          var outputConfig = resolveConfig(getPluginConfig());
-          try {
-            var auditedResp = await auditOutputResponse(
-              originalFetch,
-              outputConfig,
-              resp,
-              userPrompt,
-              "session-openclaw",
-              callId,
-              url,
-              matchedProvider
-            );
-
-            var fwAction = auditedResp.headers.get("x-firewall-action") || "passed";
-            logDebug("llm", "response_audited", {
-              callId: callId,
-              url: url,
-              provider: matchedProvider.providerId,
-              firewallAction: fwAction,
-              totalDurationMs: Date.now() - fetchStartTime
-            });
-
-            return auditedResp;
-          } catch (auditError) {
-            logError("firewall", "output_audit_error", {
-              callId: callId,
-              error: String(auditError && auditError.message || auditError)
-            });
-            // 输出审计异常时放行（注意：resp.body 可能已被消费，此时无法恢复）
-            // 正常情况下异常应在 auditOutputResponse 内部已处理并返回重建的响应
-            return resp;
-          }
-        }
-
-        logDebug("llm", "response_passed", {
-          callId: callId,
-          url: url,
-          provider: matchedProvider.providerId,
-          status: resp.status,
-          durationMs: fetchDurationMs
-        });
-
-        return resp;
-      });
-
-      // 继承原始 fetch 的属性
-      Object.assign(wrappedFetch, originalFetch);
-      globalThis.fetch = wrappedFetch;
-      globalThis[FETCH_WRAPPED_KEY] = true;
-      logDebug("init", "fetch_interceptor_installed", {});
-    }
+    console.log("[tomzang_plungin] Configuration validated successfully");
+    console.log("[tomzang_plungin] Fetch interceptor status:", interceptorInstalled ? "ACTIVE" : "INACTIVE");
 
     // ─── 生命周期钩子（日志记录） ───
     api.on("before_prompt_build", async function (event, ctx) {
-      logDebug("hook", "before_prompt_build_ctx", {
-        agentId: ctx.agentId,
-        sessionKey: ctx.sessionKey,
-        sessionId: ctx.sessionId,
-        runId: ctx.runId,
-        userId: ctx.userId,
-        userName: ctx.userName,
-        userAgent: ctx.userAgent,
-        ip: ctx.ip
-      });
-      logDebug("hook", "before_prompt_build_event", {
-        type: event.type,
-        hasMessages: !!event.messages,
-        messagesCount: Array.isArray(event.messages) ? event.messages.length : 0,
-        messagesPreview: Array.isArray(event.messages) ? event.messages.map(function (m, idx) {
-          return {
-            idx: idx,
-            role: m.role,
-            contentType: typeof m.content,
-            hasContent: !!m.content,
-            contentPreview: (typeof m.content === "string" ? m.content.slice(0, 200) : (Array.isArray(m.content) ? "[array length=" + m.content.length + "]" : "[object]"))
-          };
-        }) : [],
-        hasSystemPrompt: !!event.systemPrompt,
-        systemPromptLength: event.systemPrompt ? event.systemPrompt.length : 0
-      });
+      console.log("[tomzang_plungin] [hook] before_prompt_build agentId=" + ctx.agentId);
     });
 
     api.on("before_agent_start", async function (event, ctx) {
-      logDebug("hook", "before_agent_start", {
-        agentId: ctx.agentId,
-        sessionKey: ctx.sessionKey
-      });
+      console.log("[tomzang_plungin] [hook] before_agent_start agentId=" + ctx.agentId);
     });
 
     api.on("session_start", async function (event, ctx) {
-      logDebug("hook", "session_start", {
-        agentId: ctx.agentId,
-        sessionId: event.sessionId
-      });
+      console.log("[tomzang_plungin] [hook] session_start agentId=" + ctx.agentId);
     });
 
     api.on("session_end", async function (event, ctx) {
-      logDebug("hook", "session_end", {
-        agentId: ctx.agentId,
-        sessionId: event.sessionId
-      });
+      console.log("[tomzang_plungin] [hook] session_end agentId=" + ctx.agentId);
     });
 
     // ─── 工具调用钩子 ───
-    api.on(
-      "before_tool_call",
-      async function (event, ctx) {
-      logDebug("tool", "before_call_ctx", {
-        agentId: ctx.agentId,
-        sessionKey: ctx.sessionKey,
-        sessionId: ctx.sessionId,
-        runId: ctx.runId,
-        toolName: ctx.toolName,
-        toolCallId: ctx.toolCallId
-      });
-      logDebug("tool", "before_call_event", {
-        toolName: event.toolName,
-        toolCallId: event.toolCallId,
-        hasParams: !!event.params,
-        paramsPreview: event.params ? JSON.stringify(event.params).slice(0, 500) : ""
-      });
-      logDebug("tool", "before_call_params", {
-        params: ctx.params || event.params
-      });
+    api.on("before_tool_call", async function (event, ctx) {
+      console.log("[tomzang_plungin] [tool] before_call toolName=" + ctx.toolName);
 
       // 工具调用防火墙检查（默认启用）
       // 默认放行浏览器搜索和飞书 cli
@@ -1379,8 +1178,8 @@ var plugin = {
 
       // 调用防火墙 API 验证工具调用
       var fwCheckResult = await callFirewallApi(
-        originalFetch,
-        config,
+        globalOriginalFetch,
+        globalConfig,
         paramsText,
         "",
         "session-openclaw",
@@ -1463,6 +1262,310 @@ var plugin = {
     logDebug("init", "hooks_registered", {});
   }
 };
+
+// ─── 全局拦截器状态 ───
+// 这些变量在模块加载时初始化，确保 fetch 包装在 provider 初始化之前完成
+var globalOriginalFetch = null;
+var globalConfig = {
+  firewallUrl: "",
+  authKey: "",
+  blockMessage: DEFAULT_BLOCK_MESSAGE,
+  debug: true  // 默认开启 debug
+};
+var globalApi = null;  // 保存 api 实例用于访问配置
+var interceptorInstalled = false;
+var fetchCallId = 0;
+
+// ─── 全局 fetch 包装函数 ───
+// 这个函数在模块加载时立即调用，确保在 provider 初始化之前完成包装
+function installGlobalFetchInterceptor() {
+  if (interceptorInstalled) {
+    console.log("[tomzang_plungin] Global fetch interceptor already installed");
+    return;
+  }
+
+  if (!globalThis.fetch) {
+    console.log("[tomzang_plungin] globalThis.fetch not available");
+    return;
+  }
+
+  // 保存原始 fetch
+  if (!globalThis[ORIGINAL_FETCH_KEY]) {
+    globalThis[ORIGINAL_FETCH_KEY] = globalThis.fetch;
+  }
+  globalOriginalFetch = globalThis[ORIGINAL_FETCH_KEY];
+
+  var wrappedFetch = (async function wrappedFetch2(input, init) {
+    var callId = ++fetchCallId;
+    var url = getUrlFromFetchArgs(input);
+    var method = getMethodFromFetchArgs(input, init);
+    var reqBodyText = await getRequestBodyText(input, init);
+
+    // ─── 双重 LLM 检测：provider 匹配 + 智能识别 ───
+    var providerUrls = [];
+    try {
+      if (globalApi && globalApi.config) {
+        providerUrls = getProviderBaseUrls(globalApi.config);
+      }
+    } catch (e) {
+      // 配置获取失败，继续处理
+    }
+    var matchedProvider = matchProviderByUrl(url, providerUrls);
+
+    // 如果 provider 没有匹配到，尝试通过请求特征智能识别
+    if (!matchedProvider) {
+      if (detectLlmRequest(url, method, reqBodyText)) {
+        // 构造一个虚拟 provider 标识
+        matchedProvider = { providerId: "_auto_detected", baseUrl: url };
+        if (globalConfig.debug) {
+          console.log("[tomzang_plungin] [llm] [auto_detected] callId=" + callId + " url=" + url);
+        }
+      }
+    }
+
+    // 非 LLM 请求直接放行
+    if (!matchedProvider) {
+      return globalOriginalFetch(input, init);
+    }
+
+    var reqHeaders = getMergedRequestHeaders(input, init);
+
+    if (globalConfig.debug) {
+      console.log("[tomzang_plungin] [llm] [request] callId=" + callId + " url=" + url + " provider=" + matchedProvider.providerId);
+    }
+
+    // ─── 输入防火墙内容检测 ───
+    var userPrompt = extractLastUserPrompt(reqBodyText);
+
+    if (globalConfig.debug) {
+      console.log("[tomzang_plungin] [llm] [extracted_user_prompt] callId=" + callId + " promptLength=" + (userPrompt ? userPrompt.length : 0));
+      if (userPrompt) {
+        console.log("[tomzang_plungin] [llm] [user_prompt_preview] callId=" + callId + " preview=" + userPrompt.slice(0, 200));
+      }
+    }
+
+    // 记录是否跳过防火墙检测
+    var skipReason = null;
+    if (!userPrompt) {
+      skipReason = "user_prompt_empty";
+    } else if (shouldSkipFirewall(userPrompt)) {
+      skipReason = "should_skip_firewall_true";
+    }
+
+    if (globalConfig.debug && skipReason) {
+      console.log("[tomzang_plungin] [llm] [firewall_skipped] callId=" + callId + " reason=" + skipReason);
+    }
+
+    if (userPrompt && !shouldSkipFirewall(userPrompt)) {
+      console.log("[tomzang_plungin] [llm] [firewall_check_start] callId=" + callId);
+      try {
+        var fwResult = await callFirewallApi(globalOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input");
+        console.log("[tomzang_plungin] [llm] [firewall_check_result] callId=" + callId + " action=" + fwResult.action + " result=" + fwResult.result);
+        if (fwResult.result === "block") {
+          var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
+          console.log("[tomzang_plungin] [llm] [request_blocked] callId=" + callId);
+          var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+          return makeBlockedResponseForRequest(wantsSse, blockMsg);
+        }
+      } catch (e) {
+        console.log("[tomzang_plungin] [firewall] [error] callId=" + callId + " error=" + String(e && e.message || e));
+      }
+    }
+
+    // ─── 放行请求，获取响应 ───
+    var resp;
+    var fetchStartTime = Date.now();
+    try {
+      resp = await globalOriginalFetch(input, init);
+    } catch (e) {
+      console.log("[tomzang_plungin] [fetch] [error] callId=" + callId + " error=" + String(e && e.message || e));
+      throw e;
+    }
+
+    var fetchDurationMs = Date.now() - fetchStartTime;
+
+    if (globalConfig.debug) {
+      console.log("[tomzang_plungin] [llm] [response_received] callId=" + callId + " status=" + resp.status);
+    }
+
+    // ─── 输出防火墙内容检测 ───
+    if (resp.ok && userPrompt && !shouldSkipFirewall(userPrompt)) {
+      try {
+        var auditedResp = await auditOutputResponse(
+          globalOriginalFetch,
+          globalConfig,
+          resp,
+          userPrompt,
+          "session-openclaw",
+          callId,
+          url,
+          matchedProvider
+        );
+        var fwAction = auditedResp.headers.get("x-firewall-action") || "passed";
+        if (globalConfig.debug) {
+          console.log("[tomzang_plungin] [llm] [response_audited] callId=" + callId + " action=" + fwAction);
+        }
+        return auditedResp;
+      } catch (auditError) {
+        console.log("[tomzang_plungin] [firewall] [output_audit_error] callId=" + callId);
+      }
+    }
+
+    if (globalConfig.debug) {
+      console.log("[tomzang_plungin] [llm] [response_passed] callId=" + callId);
+    }
+
+    return resp;
+  });
+
+  // 继承原始 fetch 的属性
+  Object.assign(wrappedFetch, globalOriginalFetch);
+  globalThis.fetch = wrappedFetch;
+  globalThis[FETCH_WRAPPED_KEY] = true;
+
+  // 🔧 尝试拦截 undici fetch（OpenClaw 使用的 HTTP 客户端）
+  try {
+    // 尝试多种方式加载 undici
+    var undici = null;
+    var undiciLoadPaths = [
+      'undici',
+      '/opt/homebrew/lib/node_modules/openclaw/node_modules/undici'
+    ];
+
+    for (var i = 0; i < undiciLoadPaths.length; i++) {
+      try {
+        undici = require(undiciLoadPaths[i]);
+        if (undici && undici.fetch) {
+          console.log("[tomzang_plungin] Loaded undici from:", undiciLoadPaths[i]);
+          break;
+        }
+      } catch (e) {
+        // 继续尝试下一个路径
+      }
+    }
+
+    if (undici && undici.fetch) {
+      // 保存原始 undici fetch
+      var undiciOriginalFetchKey = '__tomzang_plungin_original_undici_fetch__';
+      if (!globalThis[undiciOriginalFetchKey]) {
+        globalThis[undiciOriginalFetchKey] = undici.fetch;
+      }
+      var undiciOriginalFetch = globalThis[undiciOriginalFetchKey];
+
+      console.log("[tomzang_plungin] Installing undici fetch interceptor");
+
+      // 包装 undici fetch
+      var undiciFetchCallId = 0;
+      var wrappedUndiciFetch = (async function wrappedUndiciFetch2(input, init) {
+        var callId = ++undiciFetchCallId;
+        var url = getUrlFromFetchArgs(input);
+        var method = getMethodFromFetchArgs(input, init);
+        var reqBodyText = await getRequestBodyText(input, init);
+
+        // ─── 双重 LLM 检测：provider 匹配 + 智能识别 ───
+        var providerUrls = [];
+        try {
+          if (globalApi && globalApi.config) {
+            providerUrls = getProviderBaseUrls(globalApi.config);
+          }
+        } catch (e) {
+          // 配置获取失败，继续处理
+        }
+        var matchedProvider = matchProviderByUrl(url, providerUrls);
+
+        // 如果 provider 没有匹配到，尝试通过请求特征智能识别
+        if (!matchedProvider) {
+          if (detectLlmRequest(url, method, reqBodyText)) {
+            matchedProvider = { providerId: "_auto_detected_undici", baseUrl: url };
+            if (globalConfig.debug) {
+              console.log("[tomzang_plungin] [undici] [auto_detected] callId=" + callId + " url=" + url);
+            }
+          }
+        }
+
+        // 非 LLM 请求直接放行
+        if (!matchedProvider) {
+          return undiciOriginalFetch(input, init);
+        }
+
+        var reqHeaders = getMergedRequestHeaders(input, init);
+
+        if (globalConfig.debug) {
+          console.log("[tomzang_plungin] [undici] [request] callId=" + callId + " url=" + url + " provider=" + matchedProvider.providerId);
+        }
+
+        // ─── 输入防火墙内容检测 ───
+        var userPrompt = extractLastUserPrompt(reqBodyText);
+
+        if (globalConfig.debug) {
+          console.log("[tomzang_plungin] [undici] [extracted_prompt] callId=" + callId + " promptLength=" + (userPrompt ? userPrompt.length : 0));
+          if (userPrompt) {
+            console.log("[tomzang_plungin] [undici] [prompt_preview] callId=" + callId + " preview=" + userPrompt.slice(0, 200));
+          }
+        }
+
+        // 记录是否跳过防火墙检测
+        var skipReason = null;
+        if (!userPrompt) {
+          skipReason = "user_prompt_empty";
+        } else if (shouldSkipFirewall(userPrompt)) {
+          skipReason = "should_skip_firewall_true";
+        }
+
+        if (globalConfig.debug && skipReason) {
+          console.log("[tomzang_plungin] [undici] [firewall_skipped] callId=" + callId + " reason=" + skipReason);
+        }
+
+        if (userPrompt && !shouldSkipFirewall(userPrompt)) {
+          console.log("[tomzang_plungin] [undici] [firewall_check_start] callId=" + callId);
+          try {
+            var fwResult = await callFirewallApi(undiciOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input");
+            console.log("[tomzang_plungin] [undici] [firewall_check_result] callId=" + callId + " action=" + fwResult.action + " result=" + fwResult.result);
+            if (fwResult.result === "block") {
+              var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
+              console.log("[tomzang_plungin] [undici] [blocked] callId=" + callId);
+              var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+              return makeBlockedResponseForRequest(wantsSse, blockMsg);
+            }
+          } catch (e) {
+            console.log("[tomzang_plungin] [undici] [firewall_error] callId=" + callId + " error=" + String(e && e.message || e));
+          }
+        }
+
+        // ─── 放行请求，获取响应 ───
+        var resp;
+        var fetchStartTime = Date.now();
+        try {
+          resp = await undiciOriginalFetch(input, init);
+        } catch (e) {
+          console.log("[tomzang_plungin] [undici] [fetch_error] callId=" + callId + " error=" + String(e && e.message || e));
+          throw e;
+        }
+
+        if (globalConfig.debug) {
+          console.log("[tomzang_plungin] [undici] [response_received] callId=" + callId + " status=" + resp.status);
+        }
+
+        return resp;
+      });
+
+      // 替换 undici.fetch
+      undici.fetch = wrappedUndiciFetch;
+      console.log("[tomzang_plungin] Undici fetch interceptor installed successfully");
+    } else {
+      console.log("[tomzang_plungin] Undici not available in any expected path");
+    }
+  } catch (e) {
+    console.log("[tomzang_plungin] Undici interception failed:", String(e && e.message || e));
+  }
+
+  interceptorInstalled = true;
+
+  console.log("[tomzang_plungin] Global fetch interceptor installed at module load time");
+}
+
+// ─── 立即安装拦截器（模块加载时执行） ───
+installGlobalFetchInterceptor();
 
 // 导出插件：如果 definePluginEntry 可用则使用它包装，否则直接导出
 var pluginEntry = typeof definePluginEntry !== "undefined"
