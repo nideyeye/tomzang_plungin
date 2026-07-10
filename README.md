@@ -108,8 +108,8 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 
 ### 方式二：手动安装
 
-1. 进入插件目录，执行离线安装命令 `openclaw plugins install -l .`
-2. 安装完成后设置铸盾防火墙 url `openclaw config set plugins.entries.tomzang_plungin.config.firewallUrl "${铸盾防火墙地址}"`
-3. 配置对应的 key `openclaw config set plugins.entries.tomzang_plungin.authKey "${铸盾 openclaw key}"`
-4. 启用插件 
-5. 重启 gateway 应用 `openclaw gateway restart`
+1. 设置铸盾防火墙 url `openclaw config set plugins.entries.tomzang_plungin.config.firewallUrl "${铸盾防火墙地址}"`
+2. 配置对应的 key `openclaw config set plugins.entries.tomzang_plungin.config.authKey "${铸盾 openclaw key}"`
+3. 进入插件目录，执行离线安装命令 `openclaw plugins install -l .`
+4. 重启 gateway 应用 `openclaw gateway restart`
+5. 开启 debug 模式 `openclaw config set plugins.entries.tomzang_plungin.config.debug true`
