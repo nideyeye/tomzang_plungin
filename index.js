@@ -295,8 +295,38 @@ function extractTextFromContentArray(contentArray) {
 function stripMetadataPrefix(text) {
   if (!text || typeof text !== "string") return text || "";
 
+  // 找最后一个 ``` 标记的位置（元数据代码块的结束）
+  var lastFence = text.lastIndexOf("```");
+  if (lastFence !== -1) {
+    // 取 ``` 之后的内容
+    var afterFence = text.substring(lastFence + 3);
+    // 去掉开头的空白换行
+    afterFence = afterFence.replace(/^\s*\n*/, "");
+    if (afterFence.length > 0) {
+      // 在 ``` 之后的文本中继续处理飞书格式
+      var feishuInAfterFence = afterFence.match(/^\[message_id:\s*[^\]]+\]\s*([a-z]+_\w+):\s*/);
+      if (feishuInAfterFence) {
+        // 提取用户 ID 后面的内容
+        var contentAfterUserId = afterFence.substring(feishuInAfterFence[0].length);
+        var stripped = contentAfterUserId.replace(/^\s+/, "").replace(/\s+$/, "");
+        if (stripped.length > 0) {
+          logDebug("extract", "feishu_format_after_fence_stripped", {
+            userId: feishuInAfterFence[1],
+            originalLength: text.length,
+            strippedLength: stripped.length,
+            preview: stripped.slice(0, 100)
+          });
+          return stripTimestampPrefix(stripped).trim();
+        }
+      }
+      return stripTimestampPrefix(afterFence).trim();
+    }
+    // 如果 ``` 后面没内容，回退到原文
+  }
+
   // 处理飞书消息格式：[message_id: xxx]\nou_xxx: 实际内容
-  var feishuPattern = /^\[message_id:\s*[^\]]+\][\s\S]*?^([a-z]+_\w+):\s*/m;
+  // 只在没有 ``` 代码块时尝试，避免把元数据代码块之前的内容也匹配进去
+  var feishuPattern = /^\[message_id:\s*[^\]]+\]\s*([a-z]+_\w+):\s*/m;
   var feishuMatch = text.match(feishuPattern);
   if (feishuMatch) {
     // 提取用户 ID 后面的内容
@@ -314,20 +344,7 @@ function stripMetadataPrefix(text) {
     }
   }
 
-  // 找最后一个 ``` 标记的位置（元数据代码块的结束）
-  var lastFence = text.lastIndexOf("```");
-  if (lastFence !== -1) {
-    // 取 ``` 之后的内容
-    var afterFence = text.substring(lastFence + 3);
-    // 去掉开头的空白换行
-    afterFence = afterFence.replace(/^\s*\n*/, "");
-    if (afterFence.length > 0) {
-      return stripTimestampPrefix(afterFence).trim();
-    }
-    // 如果 ``` 后面没内容，回退到原文
-  }
-
-  // 没有 ``` 代码块的情况：尝试按 \n\n 分割，取最后一段
+  // 没有 ``` 代码块且没有飞书格式的情况：尝试按 \n\n 分割，取最后一段
   var parts = text.split(/\n\n/);
   var lastPart = parts[parts.length - 1];
   if (lastPart && lastPart.trim().length > 0) {
@@ -1095,8 +1112,13 @@ var plugin = {
     var getPluginConfig = function () {
       try {
         var runtimeConfig = api.runtime.config.current();
-        return runtimeConfig.plugins.entries[plugin.id].config || {};
+        console.log("[tomzang_plungin] [config_debug] runtimeConfig keys:", Object.keys(runtimeConfig || {}));
+        console.log("[tomzang_plungin] [config_debug] plugins.entries keys:", Object.keys(runtimeConfig?.plugins?.entries || {}));
+        var pluginConfig = runtimeConfig.plugins.entries[plugin.id]?.config || {};
+        console.log("[tomzang_plungin] [config_debug] pluginConfig:", pluginConfig);
+        return pluginConfig;
       } catch (e) {
+        console.log("[tomzang_plungin] [config_debug] Error reading config:", e);
         return {};
       }
     };
