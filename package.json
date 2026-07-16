@@ -1,0 +1,12 @@
+{
+  "name": "tomzang_plungin",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that logs user input and tool executions",
+  "type": "module",
+  "main": "index.js",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "logging"
+  ]
+}
