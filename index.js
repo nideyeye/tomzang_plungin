@@ -164,9 +164,35 @@ async function callFirewallApi(fetchFn, config, prompt, response, sessionId, sta
     // 响应格式异常时放行
     return { action: "pass", error: "Unexpected response format" };
   } catch (e) {
-    logError("firewall", "api_call_failed", { callId: callId, error: String(e && e.message || e) });
+    // 详细记录错误信息用于诊断
+    var errorDetails = {
+      callId: callId,
+      url: config.firewallUrl,
+      stage: stage,
+      errorMessage: String(e && e.message || e),
+      errorType: e && e.constructor ? e.constructor.name : "Unknown",
+      errorCode: e && e.code ? String(e.code) : undefined,
+      errorCause: e && e.cause ? String(e.cause.message || e.cause) : undefined
+    };
+
+    // 如果有堆栈信息，记录前几行
+    if (e && e.stack) {
+      errorDetails.stackPreview = String(e.stack).split('\n').slice(0, 3).join('\n');
+    }
+
+    // 尝试提取更多 undici 特定的错误信息
+    if (e && typeof e === 'object') {
+      var keys = Object.keys(e);
+      errorDetails.errorKeys = keys;
+      // 记录一些可能包含关键信息的字段
+      if (e.statusCode) errorDetails.statusCode = e.statusCode;
+      if (e.status) errorDetails.status = e.status;
+      if (e.reason) errorDetails.reason = e.reason;
+    }
+
+    logError("firewall", "api_call_failed", errorDetails);
     // 接口异常时放行，避免阻断正常请求
-    return { action: "pass", error: String(e && e.message || e) };
+    return { action: "pass", result: "pass", error: String(e && e.message || e) };
   }
 }
 
