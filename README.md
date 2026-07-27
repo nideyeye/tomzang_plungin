@@ -26,6 +26,7 @@ OpenCode 插件 — 记录用户输入和工具调用日志，并集成 OpenClaw
         "firewallUrl": "http://your-host:port/api/firewall/openclaw/validate",
         "authKey": "your-auth-key",
         "blockMessage": "当前请求包含敏感信息，已被安全组件拦截",
+        "firewallTimeout": 3000,
         "debug": false
       }
     }
@@ -44,6 +45,7 @@ OpenCode 插件 — 记录用户输入和工具调用日志，并集成 OpenClaw
 | `firewallUrl` | string | **是** | - | 防火墙审计接口地址 |
 | `authKey` | string | **是** | - | 调用接口的认证密钥 |
 | `blockMessage` | string | 否 | `当前请求包含敏感信息，已被安全组件拦截` | 拦截时的默认提示语 |
+| `firewallTimeout` | number | 否 | `3000` | 防火墙 API 超时时间（毫秒），超时则跳过本次审计 |
 | `debug` | boolean | 否 | `false` | 开启后打印所有请求/响应日志 |
 
 > `firewallUrl` 和 `authKey` 未配置时，插件仅记录日志，不进行安全检测。
@@ -69,6 +71,7 @@ OpenCode 插件 — 记录用户输入和工具调用日志，并集成 OpenClaw
 ```
 [tomzang_plungin] [DEBUG] 请求防火墙 source=text session_id=xxx
 [tomzang_plungin] [DEBUG] 防火墙响应 result=block action=block risk_level=3
+[tomzang_plungin] [DEBUG] 防火墙 API 超时(3000ms)，跳过本次审计
 ```
 
 ## 拦截行为
@@ -161,5 +164,7 @@ OpenCode 插件 — 记录用户输入和工具调用日志，并集成 OpenClaw
 ## 技术细节
 
 - 纯 ES Module JavaScript，无构建步骤
+- 日志默认关闭，仅在 `debug=true` 时打印
+- 防火墙 API 超时（默认 3 秒）自动跳过审计，不影响正常使用
 - 防火墙调用失败时自动降级为仅日志模式，不影响正常使用
 - 参数摘要截断至 200 字符，用户消息截断至 500 字符

@@ -68,6 +68,36 @@ function buildBlockResponse(fwData, defaultMsg) {
   return msg;
 }
 
+function getRiskEmoji(riskLevel) {
+  if (riskLevel >= 3) return "🔴";
+  if (riskLevel === 2) return "🟠";
+  if (riskLevel === 1) return "🟡";
+  return "⚪";
+}
+
+function formatHitRulesForToast(hitRules) {
+  if (!Array.isArray(hitRules) || hitRules.length === 0) return "无详细规则信息";
+
+  var lines = [];
+  for (var i = 0; i < hitRules.length; i++) {
+    var rule = hitRules[i];
+    var emoji = getRiskEmoji(rule.risk_level || 0);
+    lines.push(
+      (rule.rule_code || "-") +
+        " | " +
+        (rule.rule_name || "-") +
+        " | " +
+        emoji +
+        " " +
+        (rule.risk_level || 0) +
+        " | " +
+        (rule.description || "-") +
+        (rule.aia_name ? " | " + rule.aia_name : "")
+    );
+  }
+  return lines.join("\n");
+}
+
 function generateId() {
   return (
     "sess-" +
@@ -101,61 +131,145 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
     );
   }
 
-  var resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () {
+    controller.abort();
+  }, config.firewallTimeout);
 
-  if (!resp.ok) {
-    var errText = "";
-    try {
-      errText = await resp.text();
-    } catch (_) {}
-    throw new Error(
-      "防火墙 API 返回 " + resp.status + ": " + errText.slice(0, 200)
-    );
+  try {
+    var resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!resp.ok) {
+      var errText = "";
+      try {
+        errText = await resp.text();
+      } catch (_) {}
+      throw new Error(
+        "防火墙 API 返回 " + resp.status + ": " + errText.slice(0, 200)
+      );
+    }
+
+    var json = await resp.json();
+
+    if (config.debug) {
+      console.log(
+        "[tomzang_plungin] [DEBUG] 防火墙响应 result=" +
+          (json.data && json.data.result) +
+          " action=" +
+          (json.data && json.data.action) +
+          " risk_level=" +
+          (json.data && json.data.risk_level)
+      );
+    }
+
+    return json.data || {};
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") {
+      if (config.debug) {
+        console.log(
+          "[tomzang_plungin] [DEBUG] 防火墙 API 超时(" +
+            config.firewallTimeout +
+            "ms)，跳过本次审计"
+        );
+      }
+      return { result: "pass" };
+    }
+    throw e;
   }
-
-  var json = await resp.json();
-
-  if (config.debug) {
-    console.log(
-      "[tomzang_plungin] [DEBUG] 防火墙响应 result=" +
-        (json.data && json.data.result) +
-        " action=" +
-        (json.data && json.data.action) +
-        " risk_level=" +
-        (json.data && json.data.risk_level)
-    );
-  }
-
-  return json.data || {};
 }
 
-export default async function TomzangPlungin({ project, directory }, options) {
+// 新增：格式化命中规则表头
+var HIT_RULES_HEADER = "规则代码 | 规则名称 | 风险等级 | 描述 | AIA分类";
+
+export default async function TomzangPlungin({ project, directory, client }, options) {
   var config = {
     firewallUrl: (options && options.firewallUrl) || "",
     authKey: (options && options.authKey) || "",
     blockMessage: (options && options.blockMessage) || DEFAULT_BLOCK_MESSAGE,
+    firewallTimeout: (options && options.firewallTimeout) || 3000,
     debug: !!(options && options.debug),
   };
 
   var hasFirewall = !!(config.firewallUrl && config.authKey);
+  var hasClient = !!(client && client.tui && client.tui.showToast);
 
-  console.log(
+  function log() {
+    if (!config.debug) return;
+    console.log.apply(console, arguments);
+  }
+
+  log(
     "[tomzang_plungin] 已加载 | 项目: " +
       (project && project.id ? project.id : "unknown") +
       " | 目录: " +
       directory +
       " | 防火墙: " +
-      (hasFirewall ? "已启用" : "未配置")
+      (hasFirewall ? "已启用" : "未配置") +
+      " | Toast: " +
+      (hasClient ? "可用" : "不可用")
   );
 
   if (!hasFirewall) {
-    console.log(
+    log(
       "[tomzang_plungin] 未配置 firewallUrl 或 authKey，防火墙检测已禁用"
     );
+  }
+
+  // 新增：显示拦截 Toast 的函数
+  async function showBlockToast(fwData, source) {
+    if (!hasClient) {
+      log("[tomzang_plungin] client 不可用，无法显示 Toast");
+      return;
+    }
+
+    try {
+      var hitRulesText = formatHitRulesForToast(fwData.hit_rules);
+      var reason = fwData.violation_reason || "未知原因";
+      var riskLevel = fwData.risk_level || 0;
+      var emoji = getRiskEmoji(riskLevel);
+
+      var message =
+        "🚨 内容被拦截\n\n" +
+        "原因: " +
+        reason +
+        "\n" +
+        "风险等级: " +
+        emoji +
+        " " +
+        riskLevel +
+        "\n\n" +
+        HIT_RULES_HEADER +
+        "\n" +
+        hitRulesText;
+
+      await client.tui.showToast({
+        body: {
+          message: message,
+          variant: "error",
+        },
+      });
+
+      log(
+        "[" +
+          ts() +
+          "] [TOAST] 已显示拦截通知 source=" +
+          source +
+          " risk=" +
+          riskLevel
+      );
+    } catch (e) {
+      log(
+        "[tomzang_plungin] [WARN] 显示 Toast 失败: " +
+          (e.message || e)
+      );
+    }
   }
 
   return {
@@ -171,7 +285,7 @@ export default async function TomzangPlungin({ project, directory }, options) {
       text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
       if (!text) return;
 
-      console.log("[" + ts() + "] [USER] " + text.slice(0, 500));
+      log("[" + ts() + "] [USER] " + text.slice(0, 500));
 
       if (!hasFirewall) return;
 
@@ -184,21 +298,44 @@ export default async function TomzangPlungin({ project, directory }, options) {
           input.sessionID
         );
         if (fwData.result === "block") {
-          var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          console.log(
+          log(
             "[" + ts() + "] [BLOCK] 用户输入被拦截: " + (fwData.violation_reason || "")
           );
-          output.parts = [{ type: "text", text: blockMsg }];
-          throw new Error(blockMsg);
+
+          // 显示 Toast
+          await showBlockToast(fwData, "用户输入");
+
+          // 终止对话：用 synthetic 消息替换用户原始内容
+          // 这样用户内容不会发送给 LLM，LLM 会响应拦截说明
+          var blockMsg = buildBlockResponse(fwData, config.blockMessage);
+          var firstPart = output.parts[0] || {};
+          output.parts.length = 0;
+          output.parts.push({
+            ...firstPart,
+            type: "text",
+            text: blockMsg,
+            synthetic: true,
+          });
+
+          // 尝试中止当前生成（作为额外保险）
+          if (hasClient && input.sessionID) {
+            try {
+              await client.session.abort({ path: { id: input.sessionID } });
+              log("[" + ts() + "] [ABORT] 会话已中止");
+            } catch (e) {
+              log("[" + ts() + "] [WARN] 中止会话失败: " + (e.message || e));
+            }
+          }
+          return;
         }
       } catch (e) {
         if (e.message && e.message.indexOf("防火墙") === -1) {
-          console.log(
+          log(
             "[" + ts() + "] [BLOCK] " + e.message.slice(0, 200)
           );
           throw e;
         }
-        console.log(
+        log(
           "[" +
             ts() +
             "] [WARN] 防火墙调用失败: " +
@@ -209,7 +346,7 @@ export default async function TomzangPlungin({ project, directory }, options) {
 
     "tool.execute.before": async function (input, output) {
       var argsSummary = summarizeArgs(output.args);
-      console.log(
+      log(
         "[" + ts() + "] [TOOL:" + input.tool + "] " + argsSummary
       );
 
@@ -226,7 +363,7 @@ export default async function TomzangPlungin({ project, directory }, options) {
         );
         if (fwData.result === "block") {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          console.log(
+          log(
             "[" +
               ts() +
               "] [BLOCK] 工具调用被拦截: " +
@@ -234,10 +371,15 @@ export default async function TomzangPlungin({ project, directory }, options) {
               " - " +
               (fwData.violation_reason || "")
           );
+
+          // 显示 Toast
+          await showBlockToast(fwData, "工具调用: " + input.tool);
+
+          // 终止对话：返回 block 标记
           return { block: true, blockReason: blockMsg };
         }
       } catch (e) {
-        console.log(
+        log(
           "[" +
             ts() +
             "] [WARN] 防火墙调用失败: " +
@@ -248,7 +390,7 @@ export default async function TomzangPlungin({ project, directory }, options) {
 
     "tool.execute.after": async function (input, output) {
       var resultPreview = (output.output || "").slice(0, 500);
-      console.log(
+      log(
         "[" + ts() + "] [TOOL_RESULT:" + input.tool + "] " + resultPreview
       );
 
@@ -265,7 +407,7 @@ export default async function TomzangPlungin({ project, directory }, options) {
         );
         if (fwData.result === "block") {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          console.log(
+          log(
             "[" +
               ts() +
               "] [BLOCK] 工具结果被拦截: " +
@@ -273,10 +415,15 @@ export default async function TomzangPlungin({ project, directory }, options) {
               " - " +
               (fwData.violation_reason || "")
           );
+
+          // 显示 Toast
+          await showBlockToast(fwData, "工具结果: " + input.tool);
+
+          // 终止对话：替换输出
           output.output = blockMsg;
         }
       } catch (e) {
-        console.log(
+        log(
           "[" +
             ts() +
             "] [WARN] 防火墙调用失败: " +
@@ -286,7 +433,7 @@ export default async function TomzangPlungin({ project, directory }, options) {
     },
 
     dispose: async function () {
-      console.log("[tomzang_plungin] 已卸载");
+      log("[tomzang_plungin] 已卸载");
     },
   };
 }
