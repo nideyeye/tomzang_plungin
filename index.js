@@ -114,6 +114,7 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
     session_id: sessionId || generateId(),
     trace_id: generateId(),
     stage: source === "tool_result" ? "output" : "input",
+    source_app: "opencode",
     source: source,
     content_type: "text",
     content: {
@@ -139,7 +140,9 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
   try {
     var resp = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json" 
+      },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
