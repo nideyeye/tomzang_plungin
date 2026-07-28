@@ -125,12 +125,34 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
 
   if (config.debug) {
     console.log(
-      "[tomzang_plungin] [DEBUG] 请求防火墙 source=" +
+      "[tomzang_plungin] [DEBUG] ===== 防火墙请求 ====="
+    );
+    console.log(
+      "[tomzang_plungin] [DEBUG] URL: " + url
+    );
+    console.log(
+      "[tomzang_plungin] [DEBUG] 超时: " + config.firewallTimeout + "ms"
+    );
+    console.log(
+      "[tomzang_plungin] [DEBUG] source=" +
         source +
         " session_id=" +
-        body.session_id
+        body.session_id +
+        " trace_id=" +
+        body.trace_id
+    );
+    console.log(
+      "[tomzang_plungin] [DEBUG] 请求体: " + JSON.stringify(body, null, 2)
     );
   }
+
+  // 写入文件日志
+  writeLog(
+    config.logFile,
+    "===== 防火墙请求 =====\nURL: " + url + "\n超时: " + config.firewallTimeout + "ms\n" +
+    "source: " + source + " | session_id: " + body.session_id + " | trace_id: " + body.trace_id + "\n" +
+    "请求体: " + JSON.stringify(body, null, 2)
+  );
 
   var controller = new AbortController();
   var timeoutId = setTimeout(function () {
@@ -141,7 +163,8 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
     var resp = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json" 
+        "Content-Type": "application/json",
+        "APIKey": "admin"
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -162,7 +185,16 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
 
     if (config.debug) {
       console.log(
-        "[tomzang_plungin] [DEBUG] 防火墙响应 result=" +
+        "[tomzang_plungin] [DEBUG] ===== 防火墙响应 ====="
+      );
+      console.log(
+        "[tomzang_plungin] [DEBUG] 状态码: " + resp.status
+      );
+      console.log(
+        "[tomzang_plungin] [DEBUG] 响应体: " + JSON.stringify(json, null, 2)
+      );
+      console.log(
+        "[tomzang_plungin] [DEBUG] result=" +
           (json.data && json.data.result) +
           " action=" +
           (json.data && json.data.action) +
@@ -171,25 +203,91 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
       );
     }
 
+    // 写入文件日志
+    writeLog(
+      config.logFile,
+      "===== 防火墙响应 =====\n状态码: " + resp.status + "\n" +
+      "响应体: " + JSON.stringify(json, null, 2) + "\n" +
+      "result: " + (json.data && json.data.result) + " | action: " + (json.data && json.data.action) + " | risk_level: " + (json.data && json.data.risk_level)
+    );
+
     return json.data || {};
   } catch (e) {
     clearTimeout(timeoutId);
     if (e.name === "AbortError") {
       if (config.debug) {
         console.log(
-          "[tomzang_plungin] [DEBUG] 防火墙 API 超时(" +
-            config.firewallTimeout +
-            "ms)，跳过本次审计"
+          "[tomzang_plungin] [DEBUG] ===== 防火墙超时 ====="
+        );
+        console.log(
+          "[tomzang_plungin] [DEBUG] 超时时间: " + config.firewallTimeout + "ms"
+        );
+        console.log(
+          "[tomzang_plungin] [DEBUG] 请求URL: " + url
+        );
+        console.log(
+          "[tomzang_plungin] [DEBUG] 请求体: " + JSON.stringify(body, null, 2)
+        );
+        console.log(
+          "[tomzang_plungin] [DEBUG] 跳过本次审计，放行请求"
         );
       }
+      // 写入文件日志
+      writeLog(
+        config.logFile,
+        "===== 防火墙超时 =====\n超时时间: " + config.firewallTimeout + "ms\n" +
+        "请求URL: " + url + "\n" +
+        "请求体: " + JSON.stringify(body, null, 2) + "\n" +
+        "跳过本次审计，放行请求"
+      );
       return { result: "pass" };
     }
+    // 其他错误
+    if (config.debug) {
+      console.log(
+        "[tomzang_plungin] [DEBUG] ===== 防火墙调用错误 ====="
+      );
+      console.log(
+        "[tomzang_plungin] [DEBUG] 错误类型: " + e.name
+      );
+      console.log(
+        "[tomzang_plungin] [DEBUG] 错误信息: " + (e.message || e)
+      );
+      console.log(
+        "[tomzang_plungin] [DEBUG] 请求URL: " + url
+      );
+    }
+    // 写入文件日志
+    writeLog(
+      config.logFile,
+      "===== 防火墙调用错误 =====\n错误类型: " + e.name + "\n" +
+      "错误信息: " + (e.message || e) + "\n" +
+      "请求URL: " + url
+    );
     throw e;
   }
 }
 
 // 新增：格式化命中规则表头
 var HIT_RULES_HEADER = "规则代码 | 规则名称 | 风险等级 | 描述 | AIA分类";
+
+// 新增：写入日志到文件
+async function writeLog(logFilePath, message) {
+  if (!logFilePath) return;
+  try {
+    var timestamp = new Date().toLocaleString("zh-CN", { hour12: false });
+    var logMessage = "[" + timestamp + "] " + message + "\n";
+    // 使用 Bun 的 file API
+    var file = Bun.file(logFilePath);
+    var existingContent = "";
+    try {
+      existingContent = await file.text();
+    } catch (_) {}
+    await Bun.write(logFilePath, existingContent + logMessage);
+  } catch (e) {
+    // 静默失败，避免影响主流程
+  }
+}
 
 export default async function TomzangPlungin({ project, directory, client }, options) {
   var config = {
@@ -198,6 +296,7 @@ export default async function TomzangPlungin({ project, directory, client }, opt
     blockMessage: (options && options.blockMessage) || DEFAULT_BLOCK_MESSAGE,
     firewallTimeout: (options && options.firewallTimeout) || 3000,
     debug: !!(options && options.debug),
+    logFile: (options && options.logFile) || "",
   };
 
   var hasFirewall = !!(config.firewallUrl && config.authKey);
@@ -206,6 +305,15 @@ export default async function TomzangPlungin({ project, directory, client }, opt
   function log() {
     if (!config.debug) return;
     console.log.apply(console, arguments);
+    // 同时写入文件
+    var msg = Array.from(arguments).join(" ");
+    writeLog(config.logFile, msg);
+  }
+
+  function logToFile(message) {
+    if (config.logFile) {
+      writeLog(config.logFile, message);
+    }
   }
 
   log(
@@ -378,6 +486,16 @@ export default async function TomzangPlungin({ project, directory, client }, opt
           // 显示 Toast
           await showBlockToast(fwData, "工具调用: " + input.tool);
 
+          // 中止当前会话
+          if (hasClient && input.sessionID) {
+            try {
+              await client.session.abort({ path: { id: input.sessionID } });
+              log("[" + ts() + "] [ABORT] 会话已中止");
+            } catch (e) {
+              log("[" + ts() + "] [WARN] 中止会话失败: " + (e.message || e));
+            }
+          }
+
           // 终止对话：返回 block 标记
           return { block: true, blockReason: blockMsg };
         }
@@ -421,6 +539,16 @@ export default async function TomzangPlungin({ project, directory, client }, opt
 
           // 显示 Toast
           await showBlockToast(fwData, "工具结果: " + input.tool);
+
+          // 中止当前会话
+          if (hasClient && input.sessionID) {
+            try {
+              await client.session.abort({ path: { id: input.sessionID } });
+              log("[" + ts() + "] [ABORT] 会话已中止");
+            } catch (e) {
+              log("[" + ts() + "] [WARN] 中止会话失败: " + (e.message || e));
+            }
+          }
 
           // 终止对话：替换输出
           output.output = blockMsg;
