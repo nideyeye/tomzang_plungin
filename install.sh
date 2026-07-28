@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-# OpenCode 插件安装脚本
+# OpenCode 插件安装脚本 (Unix-like: Linux, macOS)
+# Windows 用户请使用 install.ps1
 # 支持在线安装和离线安装，可自定义配置
 
 set -euo pipefail
