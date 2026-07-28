@@ -282,10 +282,13 @@ async function writeLog(logFilePath, message) {
     var existingContent = "";
     try {
       existingContent = await file.text();
-    } catch (_) {}
+    } catch (_) {
+      existingContent = "";
+    }
     await Bun.write(logFilePath, existingContent + logMessage);
   } catch (e) {
     // 静默失败，避免影响主流程
+    console.error("[tomzang_plungin] 写入日志失败: " + (e.message || e));
   }
 }
 
@@ -310,25 +313,58 @@ export default async function TomzangPlungin({ project, directory, client }, opt
     writeLog(config.logFile, msg);
   }
 
+  // 强制写入日志（不受 debug 控制）
+  function logForce() {
+    console.log.apply(console, arguments);
+    var msg = Array.from(arguments).join(" ");
+    writeLog(config.logFile, msg);
+  }
+
   function logToFile(message) {
     if (config.logFile) {
       writeLog(config.logFile, message);
     }
   }
 
-  log(
-    "[tomzang_plungin] 已加载 | 项目: " +
-      (project && project.id ? project.id : "unknown") +
-      " | 目录: " +
-      directory +
-      " | 防火墙: " +
-      (hasFirewall ? "已启用" : "未配置") +
-      " | Toast: " +
+  // 插件加载日志
+  logForce(
+    "[tomzang_plungin] ===== 插件加载 ====="
+  );
+  logForce(
+    "[tomzang_plungin] 项目: " +
+      (project && project.id ? project.id : "unknown")
+  );
+  logForce(
+    "[tomzang_plungin] 目录: " + directory
+  );
+  logForce(
+    "[tomzang_plungin] 防火墙: " +
+      (hasFirewall ? "已启用" : "未配置")
+  );
+  logForce(
+    "[tomzang_plungin] Toast: " +
       (hasClient ? "可用" : "不可用")
+  );
+  logForce(
+    "[tomzang_plungin] Debug: " + config.debug
+  );
+  logForce(
+    "[tomzang_plungin] 日志文件: " + (config.logFile || "未配置")
+  );
+  if (hasFirewall) {
+    logForce(
+      "[tomzang_plungin] 防火墙URL: " + config.firewallUrl
+    );
+    logForce(
+      "[tomzang_plungin] 超时时间: " + config.firewallTimeout + "ms"
+    );
+  }
+  logForce(
+    "[tomzang_plungin] ===================="
   );
 
   if (!hasFirewall) {
-    log(
+    logForce(
       "[tomzang_plungin] 未配置 firewallUrl 或 authKey，防火墙检测已禁用"
     );
   }
@@ -409,8 +445,14 @@ export default async function TomzangPlungin({ project, directory, client }, opt
           input.sessionID
         );
         if (fwData.result === "block") {
-          log(
+          logForce(
             "[" + ts() + "] [BLOCK] 用户输入被拦截: " + (fwData.violation_reason || "")
+          );
+          logForce(
+            "[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0)
+          );
+          logForce(
+            "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || [])
           );
 
           // 显示 Toast
@@ -428,14 +470,28 @@ export default async function TomzangPlungin({ project, directory, client }, opt
             synthetic: true,
           });
 
-          // 尝试中止当前生成（作为额外保险）
+          logForce(
+            "[" + ts() + "] [BLOCK] 已替换用户消息为拦截说明"
+          );
+
+          // 异步尝试中止会话（不阻塞主流程）
+          // 注意：根据已知问题，abort 可能不会立即生效或会卡住
+          // 因此我们异步调用，避免阻塞用户界面
           if (hasClient && input.sessionID) {
-            try {
-              await client.session.abort({ path: { id: input.sessionID } });
-              log("[" + ts() + "] [ABORT] 会话已中止");
-            } catch (e) {
-              log("[" + ts() + "] [WARN] 中止会话失败: " + (e.message || e));
-            }
+            client.session.abort({ path: { id: input.sessionID } })
+              .then(function () {
+                logForce(
+                  "[" + ts() + "] [ABORT] 会话已中止"
+                );
+              })
+              .catch(function (e) {
+                logForce(
+                  "[" + ts() + "] [WARN] Abort 异步失败: " + (e.message || e)
+                );
+              });
+            logForce(
+              "[" + ts() + "] [BLOCK] Abort 请求已发送（异步执行中）"
+            );
           }
           return;
         }
@@ -474,7 +530,7 @@ export default async function TomzangPlungin({ project, directory, client }, opt
         );
         if (fwData.result === "block") {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          log(
+          logForce(
             "[" +
               ts() +
               "] [BLOCK] 工具调用被拦截: " +
@@ -482,21 +538,38 @@ export default async function TomzangPlungin({ project, directory, client }, opt
               " - " +
               (fwData.violation_reason || "")
           );
+          logForce(
+            "[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0)
+          );
+          logForce(
+            "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || [])
+          );
 
           // 显示 Toast
           await showBlockToast(fwData, "工具调用: " + input.tool);
 
-          // 中止当前会话
+          // 终止对话：返回 block 标记
+          // 注意：需要先返回 block，然后再异步尝试 abort
+          // 延迟执行 abort 以确保 block 先生效
           if (hasClient && input.sessionID) {
-            try {
-              await client.session.abort({ path: { id: input.sessionID } });
-              log("[" + ts() + "] [ABORT] 会话已中止");
-            } catch (e) {
-              log("[" + ts() + "] [WARN] 中止会话失败: " + (e.message || e));
-            }
+            setTimeout(function() {
+              client.session.abort({ path: { id: input.sessionID } })
+                .then(function () {
+                  logForce(
+                    "[" + ts() + "] [ABORT] 会话已中止"
+                  );
+                })
+                .catch(function (e) {
+                  logForce(
+                    "[" + ts() + "] [WARN] Abort 异步失败: " + (e.message || e)
+                  );
+                });
+              logForce(
+                "[" + ts() + "] [BLOCK] Abort 请求已发送（异步执行中）"
+              );
+            }, 100);
           }
 
-          // 终止对话：返回 block 标记
           return { block: true, blockReason: blockMsg };
         }
       } catch (e) {
@@ -528,7 +601,7 @@ export default async function TomzangPlungin({ project, directory, client }, opt
         );
         if (fwData.result === "block") {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          log(
+          logForce(
             "[" +
               ts() +
               "] [BLOCK] 工具结果被拦截: " +
@@ -536,22 +609,41 @@ export default async function TomzangPlungin({ project, directory, client }, opt
               " - " +
               (fwData.violation_reason || "")
           );
+          logForce(
+            "[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0)
+          );
+          logForce(
+            "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || [])
+          );
 
           // 显示 Toast
           await showBlockToast(fwData, "工具结果: " + input.tool);
 
-          // 中止当前会话
-          if (hasClient && input.sessionID) {
-            try {
-              await client.session.abort({ path: { id: input.sessionID } });
-              log("[" + ts() + "] [ABORT] 会话已中止");
-            } catch (e) {
-              log("[" + ts() + "] [WARN] 中止会话失败: " + (e.message || e));
-            }
-          }
-
           // 终止对话：替换输出
           output.output = blockMsg;
+
+          // 异步尝试中止会话（不阻塞主流程）
+          if (hasClient && input.sessionID) {
+            setTimeout(function() {
+              client.session.abort({ path: { id: input.sessionID } })
+                .then(function () {
+                  logForce(
+                    "[" + ts() + "] [ABORT] 会话已中止"
+                  );
+                })
+                .catch(function (e) {
+                  logForce(
+                    "[" + ts() + "] [WARN] Abort 异步失败: " + (e.message || e)
+                  );
+                });
+              logForce(
+                "[" + ts() + "] [BLOCK] Abort 请求已发送（异步执行中）"
+              );
+            }, 100);
+          }
+          logForce(
+            "[" + ts() + "] [BLOCK] 已替换工具输出为拦截消息"
+          );
         }
       } catch (e) {
         log(
