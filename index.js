@@ -460,9 +460,14 @@ async function readConfigFile() {
   // 获取插件所在目录的 config.json
   // 插件目录通常在: ~/.config/opencode/plugins/tomzang_plungin/
   // 或者项目级: <project>/.opencode/plugins/tomzang_plungin/
+  var urlModule = require("url");
+  var pathModule = require("path");
+
   var importMetaUrl = import.meta.url;
-  var pluginDir = importMetaUrl.slice(0, importMetaUrl.lastIndexOf("/"));
-  var configPath = pluginDir + "/config.json";
+  // 将 file:// URL 转换为文件系统路径
+  var pluginPath = urlModule.fileURLToPath(importMetaUrl);
+  var pluginDir = pathModule.dirname(pluginPath);
+  var configPath = pathModule.join(pluginDir, "config.json");
 
   try {
     var file = Bun.file(configPath);
@@ -484,6 +489,16 @@ export default async function TomzangPlungin({ project, directory, client }) {
     debug: (fileConfig && fileConfig.debug) || process.env.TOMZANG_DEBUG === "true",
     logFile: (fileConfig && fileConfig.logFile) || process.env.TOMZANG_LOG_FILE || "",
   };
+
+  // 调试：显示配置来源
+  logForce(
+    "[tomzang_plungin] 配置来源: " + (fileConfig ? "config.json" : "环境变量或默认值")
+  );
+  if (!fileConfig) {
+    logForce(
+      "[tomzang_plungin] 未找到 config.json 或读取失败"
+    );
+  }
 
   // 获取设备唯一标识
   var deviceId = await getDeviceId();
