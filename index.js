@@ -455,9 +455,15 @@ async function writeLog(logFilePath, message) {
   }
 }
 
-// 读取配置文件
+// 读取配置文件（从插件所在目录读取）
 async function readConfigFile() {
-  var configPath = process.env.HOME + "/.config/opencode/tomzang_plungin/config.json";
+  // 获取插件所在目录的 config.json
+  // 插件目录通常在: ~/.config/opencode/plugins/tomzang_plungin/
+  // 或者项目级: <project>/.opencode/plugins/tomzang_plungin/
+  var importMetaUrl = import.meta.url;
+  var pluginDir = importMetaUrl.slice(0, importMetaUrl.lastIndexOf("/"));
+  var configPath = pluginDir + "/config.json";
+
   try {
     var file = Bun.file(configPath);
     var text = await file.text();

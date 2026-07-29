@@ -71,7 +71,7 @@ OpenCode 插件离线安装脚本
     脚本将提示输入所有必要配置
 
 说明:
-    插件配置将保存到 ~/.config/opencode/tomzang_plungin/config.json。
+    插件配置将保存到 ~/.config/opencode/plugins/tomzang_plungin/config.json。
     安装完成后重启 OpenCode 即可生效。
 
 示例:
@@ -284,8 +284,8 @@ install_project() {
         plugin_path="${target_plugin_dir}/index.js"
     fi
 
-    # 写入配置到独立配置文件
-    write_plugin_config
+    # 写入配置到独立配置文件（项目目录）
+    write_plugin_config_to_dir "${target_plugin_dir}"
 
     # 更新 opencode.json 配置
     update_opencode_config "${plugin_path}"
@@ -311,8 +311,8 @@ install_global() {
     info "复制插件文件到 ${target_plugin_dir}"
     cp "${PLUGIN_FILE}" "${target_plugin_dir}/index.js"
 
-    # 写入配置到独立配置文件
-    write_plugin_config
+    # 写入配置到独立配置文件（全局目录）
+    write_plugin_config_to_dir "${target_plugin_dir}"
 
     # 更新 opencode.json 配置
     update_opencode_config "${target_plugin_dir}/index.js"
@@ -406,14 +406,14 @@ update_opencode_config() {
 }
 
 # 写入配置到独立配置文件
-write_plugin_config() {
-    local config_dir="${OPENCODE_CONFIG_DIR}/tomzang_plungin"
-    local config_file="${config_dir}/config.json"
+write_plugin_config_to_dir() {
+    local target_dir="$1"
+    local config_file="${target_dir}/config.json"
 
     info "写入配置文件: ${config_file}"
 
     # 创建配置目录
-    mkdir -p "${config_dir}"
+    mkdir -p "${target_dir}"
 
     # 写入配置
     cat > "${config_file}" << EOF
@@ -549,7 +549,7 @@ main() {
     echo
     success "安装完成！"
     info "插件已安装到: ${OPENCODE_PLUGINS_DIR}/tomzang_plungin"
-    info "配置已保存到: ${OPENCODE_CONFIG_DIR}/tomzang_plungin/config.json"
+    info "配置已保存到: ${OPENCODE_PLUGINS_DIR}/tomzang_plungin/config.json"
     warn "请重启 OpenCode 使插件生效"
     echo
 }
