@@ -1,4 +1,7 @@
 import fs from "fs";
+import os from "os";
+import crypto from "crypto";
+import { execSync } from "child_process";
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感信息，已被安全组件拦截";
 
 function ts() {
@@ -108,8 +111,126 @@ function generateId() {
   );
 }
 
+// 获取设备唯一标识ID
+function getDeviceId() {
+  var hardwareIds = [];
+  var platform = os.platform();
+  var execOptions = { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] };
+
+  try {
+    // 获取 CPU 信息
+    var cpuInfo = "";
+    if (platform === "linux") {
+      try {
+        cpuInfo = execSync("cat /proc/cpuinfo | grep 'processor\\|model name' | head -1", execOptions).trim();
+      } catch (_) {
+        cpuInfo = "";
+      }
+    } else if (platform === "darwin") {
+      try {
+        cpuInfo = execSync("sysctl -n machdep.cpu.brand_string", execOptions).trim();
+      } catch (_) {
+        cpuInfo = "";
+      }
+    } else if (platform === "win32") {
+      try {
+        cpuInfo = execSync("wmic cpu get ProcessorId /value", execOptions).trim().replace(/ProcessorId=/, "").replace(/\r?\n/g, "");
+      } catch (_) {
+        cpuInfo = "";
+      }
+    }
+    if (cpuInfo) hardwareIds.push(cpuInfo);
+
+    // 获取主板信息
+    var boardInfo = "";
+    if (platform === "linux") {
+      try {
+        boardInfo = execSync("dmidecode -s baseboard-serial-number 2>/dev/null || cat /sys/class/dmi/id/board_serial 2>/dev/null || echo ''", { shell: true, ...execOptions }).trim();
+      } catch (_) {
+        boardInfo = "";
+      }
+    } else if (platform === "darwin") {
+      try {
+        boardInfo = execSync("system_profiler SPHardwareDataType | grep 'Serial Number' | awk '{print $3}'", execOptions).trim();
+      } catch (_) {
+        boardInfo = "";
+      }
+    } else if (platform === "win32") {
+      try {
+        boardInfo = execSync("wmic baseboard get SerialNumber /value", execOptions).trim().replace(/SerialNumber=/, "").replace(/\r?\n/g, "");
+      } catch (_) {
+        boardInfo = "";
+      }
+    }
+    if (boardInfo) hardwareIds.push(boardInfo);
+
+    // 获取磁盘序列号（首分区/主磁盘）
+    var diskInfo = "";
+    if (platform === "linux") {
+      try {
+        diskInfo = execSync("lsblk -d -o name,serial | head -2 | tail -1 | awk '{print $2}'", execOptions).trim();
+      } catch (_) {
+        diskInfo = "";
+      }
+    } else if (platform === "darwin") {
+      try {
+        diskInfo = execSync("diskutil info / | grep 'Disk UUID' | awk '{print $3}'", execOptions).trim();
+      } catch (_) {
+        diskInfo = "";
+      }
+    } else if (platform === "win32") {
+      try {
+        diskInfo = execSync("wmic diskdrive get SerialNumber /value", execOptions).trim().replace(/SerialNumber=/, "").replace(/\r?\n/g, "");
+      } catch (_) {
+        diskInfo = "";
+      }
+    }
+    if (diskInfo) hardwareIds.push(diskInfo);
+
+    // 获取首张网卡 MAC 地址
+    var macInfo = "";
+    var networkInterfaces = os.networkInterfaces();
+    var interfaces = Object.keys(networkInterfaces);
+    for (var i = 0; i < interfaces.length; i++) {
+      var iface = interfaces[i];
+      // 跳过本地回环接口
+      if (iface === "lo" || iface.indexOf("Loopback") >= 0) continue;
+
+      var addrs = networkInterfaces[iface];
+      for (var j = 0; j < addrs.length; j++) {
+        var addr = addrs[j];
+        if (addr.family === "IPv4" && !addr.internal) {
+          macInfo = addr.mac;
+          break;
+        }
+      }
+      if (macInfo) break;
+    }
+    if (macInfo) hardwareIds.push(macInfo);
+
+    // 如果获取不到任何硬件信息，使用主机名和平台信息作为后备
+    if (hardwareIds.length === 0) {
+      hardwareIds.push(os.hostname());
+      hardwareIds.push(platform);
+      hardwareIds.push(os.arch());
+      hardwareIds.push(os.release());
+    }
+
+    // 拼接所有硬件ID并进行 SHA256 hash
+    var combined = hardwareIds.join("|");
+    var hash = crypto.createHash("sha256").update(combined).digest("hex");
+
+    return hash;
+  } catch (e) {
+    // 获取失败时使用主机名和平台信息
+    var fallbackCombined = os.hostname() + "|" + os.platform() + "|" + os.arch() + "|" + os.release();
+    return crypto.createHash("sha256").update(fallbackCombined).digest("hex");
+  }
+}
+
 async function callFirewallApi(config, prompt, response, source, sessionId) {
   var url = config.firewallUrl.replace(/\/+$/, "") + "/api/firewall/openclaw/validate";
+  var deviceId = getDeviceId();
   var body = {
     auth_key: config.authKey,
     session_id: sessionId || generateId(),
@@ -118,6 +239,7 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
     source_app: "opencode",
     source: source,
     content_type: "text",
+    device_id: deviceId,
     content: {
       prompt: prompt,
       response: response || "",
@@ -293,7 +415,7 @@ async function writeLog(logFilePath, message) {
 
 // 读取配置文件
 async function readConfigFile() {
-  var configPath = process.env.HOME + "/.config/opencode/tomzang_plungin/config.json";
+  var configPath = process.env.HOME + "/.config/opencode/plugins/tomzang_plungin/config.json";
   try {
     var text = await fs.promises.readFile(configPath, "utf-8");
     return JSON.parse(text);
