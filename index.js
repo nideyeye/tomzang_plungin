@@ -592,42 +592,27 @@ export default async function TomzangPlungin({ project, directory, client }) {
           // 显示 Toast
           await showBlockToast(fwData, "用户输入");
 
-          // 终止对话：用 synthetic 消息替换用户原始内容
-          // 这样用户内容不会发送给 LLM，LLM 会响应拦截说明
-          var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          var firstPart = output.parts[0] || {};
-          output.parts.length = 0;
-          output.parts.push({
-            ...firstPart,
-            type: "text",
-            text: blockMsg,
-            synthetic: true,
-          });
-
+          // 直接中断会话，不修改用户的任何输入
           logForce(
-            "[" + ts() + "] [BLOCK] 已替换用户消息为拦截说明"
+            "[" + ts() + "] [BLOCK] 准备中断会话"
           );
 
-          // 异步尝试中止会话（不阻塞主流程）
-          // 注意：根据已知问题，abort 可能不会立即生效或会卡住
-          // 因此我们异步调用，避免阻塞用户界面
+          // 同步调用 abort 来中断会话
           if (hasClient && input.sessionID) {
-            client.session.abort({ path: { id: input.sessionID } })
-              .then(function () {
-                logForce(
-                  "[" + ts() + "] [ABORT] 会话已中止"
-                );
-              })
-              .catch(function (e) {
-                logForce(
-                  "[" + ts() + "] [WARN] Abort 异步失败: " + (e.message || e)
-                );
-              });
-            logForce(
-              "[" + ts() + "] [BLOCK] Abort 请求已发送（异步执行中）"
-            );
+            try {
+              await client.session.abort({ path: { id: input.sessionID } });
+              logForce(
+                "[" + ts() + "] [ABORT] 会话已中止"
+              );
+            } catch (e) {
+              logForce(
+                "[" + ts() + "] [WARN] Abort 失败: " + (e.message || e)
+              );
+            }
           }
-          return;
+
+          // 抛出错误确保消息不会发送到 LLM
+          throw new Error(buildBlockResponse(fwData, config.blockMessage));
         }
       } catch (e) {
         if (e.message && e.message.indexOf("防火墙") === -1) {
