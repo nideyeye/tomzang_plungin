@@ -71,8 +71,8 @@ OpenCode 插件离线安装脚本
     脚本将提示输入所有必要配置
 
 说明:
-    插件通过环境变量进行配置，安装后会自动添加到您的 shell 配置文件中。
-    安装完成后请运行 'source ~/.zshrc' 或重启终端使环境变量生效。
+    插件配置将保存到 ~/.config/opencode/tomzang_plungin/config.json。
+    安装完成后重启 OpenCode 即可生效。
 
 示例:
     # 交互式安装
@@ -284,8 +284,8 @@ install_project() {
         plugin_path="${target_plugin_dir}/index.js"
     fi
 
-    # 添加环境变量到 shell 配置文件
-    add_env_vars_to_shell
+    # 写入配置到独立配置文件
+    write_plugin_config
 
     # 更新 opencode.json 配置
     update_opencode_config "${plugin_path}"
@@ -294,8 +294,7 @@ install_project() {
     if [[ "${need_copy_files}" == true ]]; then
         info "插件文件已复制到: ${plugin_path}"
     fi
-    info "环境变量已添加到: ${SHELL_CONFIG_FILE}"
-    warn "请运行 'source ${SHELL_CONFIG_FILE}' 或重启终端以使环境变量生效"
+    info "配置已保存到配置文件"
 }
 
 # 创建全局级安装
@@ -312,16 +311,15 @@ install_global() {
     info "复制插件文件到 ${target_plugin_dir}"
     cp "${PLUGIN_FILE}" "${target_plugin_dir}/index.js"
 
-    # 添加环境变量到 shell 配置文件
-    add_env_vars_to_shell
+    # 写入配置到独立配置文件
+    write_plugin_config
 
     # 更新 opencode.json 配置
     update_opencode_config "${target_plugin_dir}/index.js"
 
     success "全局级安装完成"
     info "插件目录: ${target_plugin_dir}"
-    info "环境变量已添加到: ${SHELL_CONFIG_FILE}"
-    warn "请运行 'source ${SHELL_CONFIG_FILE}' 或重启终端以使环境变量生效"
+    info "配置已保存到配置文件"
 }
 
 # 显示手动配置指南（已废弃，保留以备兼容）
@@ -407,50 +405,28 @@ update_opencode_config() {
     fi
 }
 
-# 添加环境变量到 shell 配置文件
-add_env_vars_to_shell() {
-    detect_shell_config
+# 写入配置到独立配置文件
+write_plugin_config() {
+    local config_dir="${OPENCODE_CONFIG_DIR}/tomzang_plungin"
+    local config_file="${config_dir}/config.json"
 
-    # 检查配置文件是否存在
-    if [[ ! -f "${SHELL_CONFIG_FILE}" ]]; then
-        warn "Shell 配置文件不存在: ${SHELL_CONFIG_FILE}"
-        read -p "是否创建该文件? (y/n): " create_file
-        if [[ "${create_file}" =~ ^[Yy]$ ]]; then
-            touch "${SHELL_CONFIG_FILE}"
-            success "已创建: ${SHELL_CONFIG_FILE}"
-        else
-            error "取消安装"
-        fi
-    fi
+    info "写入配置文件: ${config_file}"
 
-    # 检查是否已经配置过
-    if grep -q "TOMZANG_FIREWALL_URL" "${SHELL_CONFIG_FILE}" 2>/dev/null; then
-        warn "检测到已存在的 TomZang 插件配置"
-        read -p "是否覆盖现有配置? (y/n): " overwrite
-        if [[ !"${overwrite}" =~ ^[Yy]$ ]]; then
-            info "跳过环境变量配置"
-            return
-        fi
+    # 创建配置目录
+    mkdir -p "${config_dir}"
 
-        # 删除旧的配置
-        # 删除从 "# TomZang Firewall Plugin 开始" 到 "# TomZang Firewall Plugin 结束" 的所有行
-        sed -i.tmp '/# TomZang Firewall Plugin 开始/,/# TomZang Firewall Plugin 结束/d' "${SHELL_CONFIG_FILE}"
-        rm -f "${SHELL_CONFIG_FILE}.tmp"
-    fi
-
-    # 添加环境变量配置
-    cat >> "${SHELL_CONFIG_FILE}" << EOF
-
-# TomZang Firewall Plugin 开始
-export TOMZANG_FIREWALL_URL="${FIREWALL_URL}"
-export TOMZANG_AUTH_KEY="${AUTH_KEY}"
-export TOMZANG_BLOCK_MESSAGE="${BLOCK_MESSAGE}"
-export TOMZANG_FIREWALL_TIMEOUT="${FIREWALL_TIMEOUT}"
-export TOMZANG_DEBUG="${DEBUG}"
-# TomZang Firewall Plugin 结束
+    # 写入配置
+    cat > "${config_file}" << EOF
+{
+  "firewallUrl": "${FIREWALL_URL}",
+  "authKey": "${AUTH_KEY}",
+  "blockMessage": "${BLOCK_MESSAGE}",
+  "firewallTimeout": ${FIREWALL_TIMEOUT},
+  "debug": ${DEBUG}
+}
 EOF
 
-    success "环境变量已添加到 ${SHELL_CONFIG_FILE}"
+    success "配置已保存到 ${config_file}"
 }
 
 # 显示配置摘要
@@ -466,7 +442,6 @@ show_summary() {
     echo "  拦截消息: ${BLOCK_MESSAGE}"
     echo "  超时时间: ${FIREWALL_TIMEOUT}ms"
     echo "  调试模式: ${DEBUG}"
-    echo "  Shell 配置文件: ${SHELL_CONFIG_FILE:-<自动检测>}"
     echo
 }
 
@@ -574,10 +549,8 @@ main() {
     echo
     success "安装完成！"
     info "插件已安装到: ${OPENCODE_PLUGINS_DIR}/tomzang_plungin"
-    info "环境变量已添加到: ${SHELL_CONFIG_FILE}"
-    warn "请运行以下命令使环境变量生效："
-    warn "  source ${SHELL_CONFIG_FILE}"
-    warn "或重启终端"
+    info "配置已保存到: ${OPENCODE_CONFIG_DIR}/tomzang_plungin/config.json"
+    warn "请重启 OpenCode 使插件生效"
     echo
 }
 

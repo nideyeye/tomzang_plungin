@@ -292,14 +292,28 @@ async function writeLog(logFilePath, message) {
   }
 }
 
+// 读取配置文件
+async function readConfigFile() {
+  var configPath = process.env.HOME + "/.config/opencode/tomzang_plungin/config.json";
+  try {
+    var file = Bun.file(configPath);
+    var text = await file.text();
+    return JSON.parse(text);
+  } catch (_) {
+    return null;
+  }
+}
+
 export default async function TomzangPlungin({ project, directory, client }) {
+  // 优先级: 配置文件 > 环境变量 > 默认值
+  var fileConfig = await readConfigFile();
   var config = {
-    firewallUrl: process.env.TOMZANG_FIREWALL_URL || "",
-    authKey: process.env.TOMZANG_AUTH_KEY || "",
-    blockMessage: process.env.TOMZANG_BLOCK_MESSAGE || DEFAULT_BLOCK_MESSAGE,
-    firewallTimeout: parseInt(process.env.TOMZANG_FIREWALL_TIMEOUT || "3000", 10),
-    debug: process.env.TOMZANG_DEBUG === "true",
-    logFile: process.env.TOMZANG_LOG_FILE || "",
+    firewallUrl: (fileConfig && fileConfig.firewallUrl) || process.env.TOMZANG_FIREWALL_URL || "",
+    authKey: (fileConfig && fileConfig.authKey) || process.env.TOMZANG_AUTH_KEY || "",
+    blockMessage: (fileConfig && fileConfig.blockMessage) || process.env.TOMZANG_BLOCK_MESSAGE || DEFAULT_BLOCK_MESSAGE,
+    firewallTimeout: parseInt((fileConfig && fileConfig.firewallTimeout) || process.env.TOMZANG_FIREWALL_TIMEOUT || "3000", 10),
+    debug: (fileConfig && fileConfig.debug) || process.env.TOMZANG_DEBUG === "true",
+    logFile: (fileConfig && fileConfig.logFile) || process.env.TOMZANG_LOG_FILE || "",
   };
 
   var hasFirewall = !!(config.firewallUrl && config.authKey);
