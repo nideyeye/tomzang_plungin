@@ -1,165 +1,8 @@
+import fs from "fs";
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感信息，已被安全组件拦截";
 
 function ts() {
   return new Date().toLocaleString("zh-CN", { hour12: false });
-}
-
-// 获取设备唯一标识
-async function getDeviceId() {
-  var os = require("os");
-  var crypto = require("crypto");
-  var exec = require("child_process").exec;
-
-  var hardwareInfo = [];
-
-  // 1. 获取 CPU 信息
-  try {
-    var cpuModel = os.cpus()[0].model;
-    hardwareInfo.push("cpu:" + cpuModel);
-  } catch (_) {}
-
-  // 2. 获取 MAC 地址（首张非内部网卡）
-  try {
-    var networkInterfaces = os.networkInterfaces();
-    var macAddress = null;
-    var interfaceNames = Object.keys(networkInterfaces);
-    for (var i = 0; i < interfaceNames.length; i++) {
-      var iface = networkInterfaces[interfaceNames[i]];
-      if (iface && iface.length > 0) {
-        // 跳过内部/虚拟网卡
-        if (interfaceNames[i].indexOf("lo") !== 0 &&
-            interfaceNames[i].indexOf("veth") !== 0 &&
-            interfaceNames[i].indexOf("docker") !== 0) {
-          macAddress = iface[0].mac;
-          break;
-        }
-      }
-    }
-    if (macAddress && macAddress !== "00:00:00:00:00:00") {
-      hardwareInfo.push("mac:" + macAddress);
-    }
-  } catch (_) {}
-
-  // 3. 获取主机名
-  try {
-    var hostname = os.hostname();
-    hardwareInfo.push("hostname:" + hostname);
-  } catch (_) {}
-
-  // 4. 获取系统特定硬件信息
-  var platform = os.platform();
-  var systemInfo = "";
-
-  if (platform === "darwin") {
-    // macOS
-    try {
-      // 获取硬件 UUID
-      var hwUuid = await new Promise(function(resolve) {
-        exec("ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID", function(error, stdout) {
-          if (stdout && stdout.match(/"IOPlatformUUID" = "([^"]+)"/)) {
-            resolve(stdout.match(/"IOPlatformUUID" = "([^"]+)"/)[1]);
-          } else {
-            resolve("");
-          }
-        });
-      });
-      if (hwUuid) systemInfo += hwUuid;
-    } catch (_) {}
-
-    try {
-      // 获取磁盘序列号（启动盘）
-      var diskSerial = await new Promise(function(resolve) {
-        exec("diskutil info / | grep 'Volume UUID'", function(error, stdout) {
-          if (stdout && stdout.match(/Volume UUID:\s*([A-F0-9-]+)/i)) {
-            resolve(stdout.match(/Volume UUID:\s*([A-F0-9-]+)/i)[1]);
-          } else {
-            resolve("");
-          }
-        });
-      });
-      if (diskSerial) systemInfo += diskSerial;
-    } catch (_) {}
-  } else if (platform === "linux") {
-    // Linux
-    try {
-      // 读取 machine-id
-      var fs = require("fs");
-      var machineIdPath = "/etc/machine-id";
-      if (fs.existsSync(machineIdPath)) {
-        var machineId = fs.readFileSync(machineIdPath, "utf8").trim();
-        systemInfo += machineId;
-      }
-    } catch (_) {}
-
-    try {
-      // 尝试读取 DMI 产品 UUID
-      var dmiUuid = await new Promise(function(resolve) {
-        exec("cat /sys/class/dmi/id/product_uuid 2>/dev/null", function(error, stdout) {
-          resolve(stdout ? stdout.trim() : "");
-        });
-      });
-      if (dmiUuid) systemInfo += dmiUuid;
-    } catch (_) {}
-  } else if (platform === "win32") {
-    // Windows
-    try {
-      // 获取主板序列号
-      var boardSerial = await new Promise(function(resolve) {
-        exec("wmic baseboard get serialnumber", function(error, stdout) {
-          if (stdout) {
-            var lines = stdout.split("\n");
-            for (var i = 0; i < lines.length; i++) {
-              var line = lines[i].trim();
-              if (line && line !== "SerialNumber") {
-                resolve(line);
-                return;
-              }
-            }
-          }
-          resolve("");
-        });
-      });
-      if (boardSerial) systemInfo += boardSerial;
-    } catch (_) {}
-
-    try {
-      // 获取 CPU ID
-      var cpuId = await new Promise(function(resolve) {
-        exec("wmic cpu get processorid", function(error, stdout) {
-          if (stdout) {
-            var lines = stdout.split("\n");
-            for (var i = 0; i < lines.length; i++) {
-              var line = lines[i].trim();
-              if (line && line !== "ProcessorId") {
-                resolve(line);
-                return;
-              }
-            }
-          }
-          resolve("");
-        });
-      });
-      if (cpuId) systemInfo += cpuId;
-    } catch (_) {}
-  }
-
-  if (systemInfo) {
-    hardwareInfo.push("system:" + systemInfo);
-  }
-
-  // 如果没有获取到任何信息，使用备用方案
-  if (hardwareInfo.length === 0) {
-    var fallbackInfo = "os:" + platform + ";arch:" + os.arch() + ";cpus:" + os.cpus().length;
-    hardwareInfo.push(fallbackInfo);
-  }
-
-  // 拼接所有信息
-  var combined = hardwareInfo.join("|");
-
-  // 计算 SHA256 hash
-  var hash = crypto.createHash("sha256").update(combined).digest("hex");
-
-  return hash;
 }
 
 function summarizeArgs(args) {
@@ -265,7 +108,7 @@ function generateId() {
   );
 }
 
-async function callFirewallApi(config, prompt, response, source, sessionId, deviceId) {
+async function callFirewallApi(config, prompt, response, source, sessionId) {
   var url = config.firewallUrl.replace(/\/+$/, "") + "/api/firewall/openclaw/validate";
   var body = {
     auth_key: config.authKey,
@@ -280,11 +123,6 @@ async function callFirewallApi(config, prompt, response, source, sessionId, devi
       response: response || "",
     },
   };
-
-  // 添加 device_id
-  if (deviceId) {
-    body.device_id = deviceId;
-  }
 
   if (config.debug) {
     console.log(
@@ -440,38 +278,24 @@ async function writeLog(logFilePath, message) {
   try {
     var timestamp = new Date().toLocaleString("zh-CN", { hour12: false });
     var logMessage = "[" + timestamp + "] " + message + "\n";
-    // 使用 Bun 的 file API
-    var file = Bun.file(logFilePath);
     var existingContent = "";
     try {
-      existingContent = await file.text();
+      existingContent = await fs.promises.readFile(logFilePath, "utf-8");
     } catch (_) {
       existingContent = "";
     }
-    await Bun.write(logFilePath, existingContent + logMessage);
+    await fs.promises.writeFile(logFilePath, existingContent + logMessage, "utf-8");
   } catch (e) {
     // 静默失败，避免影响主流程
     console.error("[tomzang_plungin] 写入日志失败: " + (e.message || e));
   }
 }
 
-// 读取配置文件（从插件所在目录读取）
+// 读取配置文件
 async function readConfigFile() {
-  // 获取插件所在目录的 config.json
-  // 插件目录通常在: ~/.config/opencode/plugins/tomzang_plungin/
-  // 或者项目级: <project>/.opencode/plugins/tomzang_plungin/
-  var urlModule = require("url");
-  var pathModule = require("path");
-
-  var importMetaUrl = import.meta.url;
-  // 将 file:// URL 转换为文件系统路径
-  var pluginPath = urlModule.fileURLToPath(importMetaUrl);
-  var pluginDir = pathModule.dirname(pluginPath);
-  var configPath = pathModule.join(pluginDir, "config.json");
-
+  var configPath = process.env.HOME + "/.config/opencode/tomzang_plungin/config.json";
   try {
-    var file = Bun.file(configPath);
-    var text = await file.text();
+    var text = await fs.promises.readFile(configPath, "utf-8");
     return JSON.parse(text);
   } catch (_) {
     return null;
@@ -489,19 +313,6 @@ export default async function TomzangPlungin({ project, directory, client }) {
     debug: (fileConfig && fileConfig.debug) || process.env.TOMZANG_DEBUG === "true",
     logFile: (fileConfig && fileConfig.logFile) || process.env.TOMZANG_LOG_FILE || "",
   };
-
-  // 调试：显示配置来源
-  logForce(
-    "[tomzang_plungin] 配置来源: " + (fileConfig ? "config.json" : "环境变量或默认值")
-  );
-  if (!fileConfig) {
-    logForce(
-      "[tomzang_plungin] 未找到 config.json 或读取失败"
-    );
-  }
-
-  // 获取设备唯一标识
-  var deviceId = await getDeviceId();
 
   var hasFirewall = !!(config.firewallUrl && config.authKey);
   var hasClient = !!(client && client.tui && client.tui.showToast);
@@ -643,8 +454,7 @@ export default async function TomzangPlungin({ project, directory, client }) {
           text,
           "",
           "text",
-          input.sessionID,
-          deviceId
+          input.sessionID
         );
         if (fwData.result === "block") {
           logForce(
@@ -728,8 +538,7 @@ export default async function TomzangPlungin({ project, directory, client }) {
           toolCommand,
           "",
           "tool_call",
-          input.sessionID,
-          deviceId
+          input.sessionID
         );
         if (fwData.result === "block") {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
@@ -800,8 +609,7 @@ export default async function TomzangPlungin({ project, directory, client }) {
           toolCommand,
           output.output || "",
           "tool_result",
-          input.sessionID,
-          deviceId
+          input.sessionID
         );
         if (fwData.result === "block") {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
