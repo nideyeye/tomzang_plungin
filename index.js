@@ -292,14 +292,14 @@ async function writeLog(logFilePath, message) {
   }
 }
 
-export default async function TomzangPlungin({ project, directory, client }, options) {
+export default async function TomzangPlungin({ project, directory, client }) {
   var config = {
-    firewallUrl: (options && options.firewallUrl) || "",
-    authKey: (options && options.authKey) || "",
-    blockMessage: (options && options.blockMessage) || DEFAULT_BLOCK_MESSAGE,
-    firewallTimeout: (options && options.firewallTimeout) || 3000,
-    debug: !!(options && options.debug),
-    logFile: (options && options.logFile) || "",
+    firewallUrl: process.env.TOMZANG_FIREWALL_URL || "",
+    authKey: process.env.TOMZANG_AUTH_KEY || "",
+    blockMessage: process.env.TOMZANG_BLOCK_MESSAGE || DEFAULT_BLOCK_MESSAGE,
+    firewallTimeout: parseInt(process.env.TOMZANG_FIREWALL_TIMEOUT || "3000", 10),
+    debug: process.env.TOMZANG_DEBUG === "true",
+    logFile: process.env.TOMZANG_LOG_FILE || "",
   };
 
   var hasFirewall = !!(config.firewallUrl && config.authKey);
