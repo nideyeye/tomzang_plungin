@@ -42,6 +42,15 @@ DEBUG=false
 PROJECT_DIR="${PWD}"
 SKIP_VALIDATION=false
 
+# 设备注册相关
+REGISTER_URL=""
+DEVICE_ID=""
+OS_STRING=""
+PLATFORM=""
+IP_ADDRESS=""
+APP_VERSION=""
+APP_TYP="client"
+
 # Shell 配置文件路径
 SHELL_CONFIG_FILE=""
 
@@ -72,6 +81,8 @@ OpenCode 插件离线安装脚本
 
 说明:
     插件配置将保存到 ~/.config/opencode/plugins/tomzang_plungin/config.json。
+    安装前会自动收集设备信息并向防火墙服务注册（需配置 firewall-url 和 auth-key）。
+    注册成功后才能继续安装，注册失败则安装终止。
     安装完成后重启 OpenCode 即可生效。
 
 示例:
@@ -176,6 +187,294 @@ validate_config() {
 
     success "配置验证通过"
 }
+
+# === 设备注册相关函数 ===
+
+# 检测操作系统平台
+get_platform() {
+    local os_name
+    os_name=$(uname -s)
+    case "${os_name}" in
+        Darwin)
+            PLATFORM="mac"
+            ;;
+        Linux)
+            PLATFORM="linux"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            PLATFORM="windows"
+            ;;
+        *)
+            PLATFORM="unknown"
+            ;;
+    esac
+}
+
+# 获取操作系统版本字符串
+get_os_string() {
+    local os_name
+    os_name=$(uname -s)
+    case "${os_name}" in
+        Darwin)
+            local macos_name macos_ver
+            macos_name=$(sw_vers -productName 2>/dev/null || echo "macOS")
+            macos_ver=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+            OS_STRING="${macos_name} ${macos_ver}"
+            ;;
+        Linux)
+            if [[ -f /etc/os-release ]]; then
+                OS_STRING=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"') || true
+            fi
+            if [[ -z "${OS_STRING}" ]] && [[ -f /etc/lsb-release ]]; then
+                OS_STRING=$(grep DESCRIPTION /etc/lsb-release | cut -d= -f2 | tr -d '"') || true
+            fi
+            if [[ -z "${OS_STRING}" ]]; then
+                OS_STRING="Linux $(uname -r)"
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            OS_STRING="Windows $(uname -r)"
+            ;;
+        *)
+            OS_STRING="${os_name} $(uname -r)"
+            ;;
+    esac
+}
+
+# 获取本机主 IP 地址
+get_ip_address() {
+    local os_name
+    os_name=$(uname -s)
+    case "${os_name}" in
+        Darwin)
+            local default_iface
+            default_iface=$(route -n get default 2>/dev/null | grep 'interface:' | awk '{print $2}') || true
+            if [[ -n "${default_iface}" ]]; then
+                IP_ADDRESS=$(ifconfig "${default_iface}" 2>/dev/null | grep 'inet ' | awk '{print $2}') || true
+            fi
+            ;;
+        Linux)
+            IP_ADDRESS=$(ip route get 1 2>/dev/null | awk '{print $NF; exit}') || true
+            if [[ -z "${IP_ADDRESS}" ]]; then
+                IP_ADDRESS=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            IP_ADDRESS=$(ipconfig 2>/dev/null | grep 'IPv4' | head -1 | awk '{print $NF}') || true
+            ;;
+    esac
+    if [[ -z "${IP_ADDRESS}" ]]; then
+        IP_ADDRESS=$(hostname 2>/dev/null || echo "127.0.0.1")
+    fi
+}
+
+# 获取设备唯一标识（SHA256 硬件指纹，与 index.js 保持一致）
+get_device_id() {
+    local hardware_ids=()
+    local os_name
+    os_name=$(uname -s)
+
+    # CPU 信息
+    local cpu_info=""
+    if [[ "${os_name}" == "Linux" ]]; then
+        cpu_info=$(grep -E 'processor|model name' /proc/cpuinfo 2>/dev/null | head -1) || true
+    elif [[ "${os_name}" == "Darwin" ]]; then
+        cpu_info=$(sysctl -n machdep.cpu.brand_string 2>/dev/null) || true
+    fi
+    if [[ -n "${cpu_info}" ]]; then
+        hardware_ids+=("${cpu_info}")
+    fi
+
+    # 主板信息
+    local board_info=""
+    if [[ "${os_name}" == "Linux" ]]; then
+        board_info=$(dmidecode -s baseboard-serial-number 2>/dev/null || cat /sys/class/dmi/id/board_serial 2>/dev/null || echo "")
+        board_info=$(echo "${board_info}" | xargs)
+    elif [[ "${os_name}" == "Darwin" ]]; then
+        board_info=$(system_profiler SPHardwareDataType 2>/dev/null | grep 'Serial Number' | awk '{print $3}') || true
+    fi
+    if [[ -n "${board_info}" ]]; then
+        hardware_ids+=("${board_info}")
+    fi
+
+    # 磁盘序列号
+    local disk_info=""
+    if [[ "${os_name}" == "Linux" ]]; then
+        disk_info=$(lsblk -d -o name,serial 2>/dev/null | head -2 | tail -1 | awk '{print $2}') || true
+    elif [[ "${os_name}" == "Darwin" ]]; then
+        disk_info=$(diskutil info / 2>/dev/null | grep 'Disk UUID' | awk '{print $3}') || true
+    fi
+    if [[ -n "${disk_info}" ]]; then
+        hardware_ids+=("${disk_info}")
+    fi
+
+    # MAC 地址（第一个非 loopback 的 IPv4 接口，与 index.js 一致）
+    local mac_info=""
+    if [[ "${os_name}" == "Linux" ]]; then
+        local iface_path
+        for iface_path in /sys/class/net/*/address; do
+            [[ -f "${iface_path}" ]] || continue
+            local ifname
+            ifname=$(basename "$(dirname "${iface_path}")")
+            [[ "${ifname}" == "lo" ]] && continue
+            local addr
+            addr=$(cat "${iface_path}" 2>/dev/null | tr -d '\n') || true
+            if [[ -n "${addr}" ]] && ip addr show "${ifname}" 2>/dev/null | grep -q 'inet '; then
+                mac_info="${addr}"
+                break
+            fi
+        done
+    elif [[ "${os_name}" == "Darwin" ]]; then
+        local iface_list
+        iface_list=$(ifconfig -l 2>/dev/null) || true
+        for ifname in ${iface_list}; do
+            [[ "${ifname}" == "lo0" ]] && continue
+            local mac
+            mac=$(ifconfig "${ifname}" 2>/dev/null | grep 'ether' | awk '{print $2}') || true
+            if [[ -n "${mac}" ]] && ifconfig "${ifname}" 2>/dev/null | grep -q 'inet '; then
+                mac_info="${mac}"
+                break
+            fi
+        done
+    fi
+    if [[ -n "${mac_info}" ]]; then
+        hardware_ids+=("${mac_info}")
+    fi
+
+    # 拼接所有硬件 ID 进行 SHA256 hash
+    local combined
+    if [[ ${#hardware_ids[@]} -eq 0 ]]; then
+        # 未获取到硬件信息时使用后备方案（需与 index.js 一致：hostname|platform|arch|release）
+        local platform_lower
+        platform_lower=$(echo "${os_name}" | tr '[:upper:]' '[:lower:]')
+        combined="$(hostname 2>/dev/null || echo 'unknown')|${platform_lower}|$(uname -m)|$(uname -r)"
+    else
+        combined=$(printf '%s|' "${hardware_ids[@]}")
+        combined="${combined%|}"
+    fi
+
+    DEVICE_ID=$(echo -n "${combined}" | shasum -a 256 2>/dev/null | cut -d' ' -f1) || true
+    if [[ -z "${DEVICE_ID}" ]]; then
+        DEVICE_ID=$(echo -n "${combined}" | sha256sum 2>/dev/null | cut -d' ' -f1) || true
+    fi
+    if [[ -z "${DEVICE_ID}" ]]; then
+        error "无法计算设备标识（需要 shasum 或 sha256sum 命令）"
+    fi
+}
+
+# 检测 OpenCode 版本和类型（CLI 优先，其次桌面版）
+detect_opencode_version() {
+    if command -v opencode &>/dev/null; then
+        local cli_version
+        cli_version=$(opencode --version 2>/dev/null) || true
+        if [[ -n "${cli_version}" ]]; then
+            APP_VERSION="${cli_version}"
+            APP_TYP="cli"
+            return
+        fi
+    fi
+
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        local plist="/Applications/OpenCode.app/Contents/Info.plist"
+        if [[ -f "${plist}" ]]; then
+            local desktop_version
+            desktop_version=$(defaults read "${plist}" CFBundleShortVersionString 2>/dev/null) || true
+            if [[ -n "${desktop_version}" ]]; then
+                APP_VERSION="${desktop_version}"
+                APP_TYP="client"
+                return
+            fi
+        fi
+    fi
+
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        local app_dir
+        app_dir=$(ls -d /tmp/.mount_opencode* 2>/dev/null | head -1) || true
+        if [[ -n "${app_dir}" ]] && [[ -f "${app_dir}/resources/app/package.json" ]]; then
+            local pkg_version
+            pkg_version=$(grep '"version"' "${app_dir}/resources/app/package.json" 2>/dev/null | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/') || true
+            if [[ -n "${pkg_version}" ]]; then
+                APP_VERSION="${pkg_version}"
+                APP_TYP="client"
+                return
+            fi
+        fi
+        local flatpak_info
+        flatpak_info=$(flatpak info ai.opencode.OpenCode 2>/dev/null | grep Version | awk '{print $2}') || true
+        if [[ -n "${flatpak_info}" ]]; then
+            APP_VERSION="${flatpak_info}"
+            APP_TYP="client"
+            return
+        fi
+    fi
+
+    APP_VERSION="${OPENCODE_VERSION:-unknown}"
+    APP_TYP="${OPENCODE_APP_TYPE:-${APP_TYP}}"
+}
+
+# 设备注册：收集信息并调用注册 API
+register_device() {
+    local register_url="${FIREWALL_URL}"
+    register_url="${register_url%/}/api/firewall/openclaw/device/register"
+
+    info "正在收集设备信息..."
+    get_platform
+    get_os_string
+    get_ip_address
+    get_device_id
+    detect_opencode_version
+
+    info "设备信息:"
+    info "  平台: ${PLATFORM} | 系统: ${OS_STRING}"
+    info "  设备ID: ${DEVICE_ID}"
+    info "  IP: ${IP_ADDRESS} | OpenCode: ${APP_TYP} v${APP_VERSION}"
+
+    info "正在向服务器注册设备..."
+    if [[ "${DEBUG}" == true ]]; then
+        info "注册 URL: ${register_url}"
+    fi
+
+    local http_code
+    local temp_response
+    temp_response=$(mktemp)
+
+    set +e
+    http_code=$(curl -s -o "${temp_response}" -w "%{http_code}" \
+        --request POST \
+        --url "${register_url}" \
+        --header 'Content-Type: application/json' \
+        --header 'Accept: */*' \
+        --header 'Accept-Encoding: gzip, deflate, br' \
+        --header 'Connection: keep-alive' \
+        --header "User-Agent: OpenCode-Installer/1.0" \
+        --data "{
+            \"auth_key\":\"${AUTH_KEY}\",
+            \"device_id\":\"${DEVICE_ID}\",
+            \"ip\":\"${IP_ADDRESS}\",
+            \"os\":\"${OS_STRING}\",
+            \"platform\":\"${PLATFORM}\",
+            \"app_version\":\"${APP_VERSION}\",
+            \"app_typ\":\"${APP_TYP}\",
+            \"plugin_version\":\"v1.0.0\"
+        }" 2>/dev/null)
+    local curl_exit=$?
+    set -e
+
+    local response_body
+    response_body=$(cat "${temp_response}" 2>/dev/null || echo "")
+    rm -f "${temp_response}"
+
+    if [[ $curl_exit -ne 0 ]]; then
+        error "设备注册失败: curl 错误 (exit=${curl_exit})"
+    fi
+    if [[ "${http_code}" != "200" ]]; then
+        error "设备注册失败 (HTTP ${http_code}): ${response_body}"
+    fi
+
+    success "设备注册成功"
+}
+
+# === 设备注册相关函数结束 ===
 
 # 读取用户输入
 read_input() {
@@ -437,6 +736,9 @@ show_summary() {
     if [[ "${INSTALL_MODE}" == "project" ]]; then
         echo "  项目目录: ${PROJECT_DIR}"
     fi
+    echo "  设备 ID: ${DEVICE_ID:-<未注册>}"
+    echo "  系统: ${OS_STRING:-<未检测>}"
+    echo "  平台: ${PLATFORM:-<未检测>}"
     echo "  防火墙 URL: ${FIREWALL_URL:-<未配置，仅日志模式>}"
     echo "  认证密钥: ${AUTH_KEY:+<已设置>}"
     echo "  拦截消息: ${BLOCK_MESSAGE}"
@@ -528,6 +830,13 @@ main() {
     # 验证安装模式
     if [[ "${INSTALL_MODE}" != "project" ]] && [[ "${INSTALL_MODE}" != "global" ]]; then
         error "无效的安装模式: ${INSTALL_MODE} (必须是 project 或 global)"
+    fi
+
+    # 设备注册（只有当配置了防火墙时才注册，必须成功才能继续）
+    if [[ -n "${FIREWALL_URL}" ]] && [[ -n "${AUTH_KEY}" ]]; then
+        register_device
+    else
+        warn "未配置 firewall-url 和 auth-key，跳过设备注册"
     fi
 
     # 显示配置摘要
