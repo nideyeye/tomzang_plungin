@@ -34,6 +34,10 @@
       "debug": {
         "type": "boolean",
         "description": "Enable debug mode for detailed logging (default: false)"
+      },
+      "timeout": {
+        "type": "number",
+        "description": "Firewall API timeout in milliseconds (default: 3000)"
       }
     },
     "required": ["firewallUrl", "authKey"]

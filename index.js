@@ -1,6 +1,7 @@
 // ─── 配置解析 ───
 
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
+var DEFAULT_TIMEOUT_MS = 3000;  // 默认防火墙 API 超时时间 3 秒
 var FIREWALL_API_PATH = "/api/firewall/openclaw/validate";
 
 function buildFullFirewallUrl(host) {
@@ -11,6 +12,11 @@ function buildFullFirewallUrl(host) {
 
 function resolveConfig(rawConfig) {
   var cfg = rawConfig ?? {};
+  // 解析 timeout，必须是正整数
+  var timeout = DEFAULT_TIMEOUT_MS;
+  if (typeof cfg.timeout === "number" && cfg.timeout > 0) {
+    timeout = Math.floor(cfg.timeout);
+  }
   return {
     firewallUrl: buildFullFirewallUrl(cfg.firewallUrl),
     authKey: typeof cfg.authKey === "string" && cfg.authKey.trim() !== ""
@@ -19,7 +25,8 @@ function resolveConfig(rawConfig) {
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
-    debug: typeof cfg.debug === "boolean" ? cfg.debug : true  // 默认开启 debug
+    debug: typeof cfg.debug === "boolean" ? cfg.debug : true,  // 默认开启 debug
+    timeout: timeout
   };
 }
 
@@ -103,11 +110,23 @@ async function callFirewallApi(fetchFn, config, prompt, response, sessionId, sta
 
   try {
     var startTime = Date.now();
-    var resp = await fetchFn(config.firewallUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody)
-    });
+    // 创建超时控制器（兼容 fetch 和 undici.fetch）
+    var controller = new AbortController();
+    var timeoutId = setTimeout(function () {
+      controller.abort();
+    }, config.timeout);
+
+    var resp;
+    try {
+      resp = await fetchFn(config.firewallUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     var durationMs = Date.now() - startTime;
 
@@ -1124,7 +1143,8 @@ var plugin = {
       firewallUrl: { type: "string", description: "Firewall API host and port, e.g. http://localhost:8080 (required, path /api/firewall/openclaw/validate will be appended automatically)" },
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
-      debug: { type: "boolean", default: true, description: "Enable debug mode (enabled by default for troubleshooting)" }
+      debug: { type: "boolean", default: true, description: "Enable debug mode (enabled by default for troubleshooting)" },
+      timeout: { type: "number", default: DEFAULT_TIMEOUT_MS, description: "Firewall API timeout in milliseconds (default: 3000)" }
     },
     required: ["firewallUrl", "authKey"]
   },
@@ -1318,7 +1338,8 @@ var globalConfig = {
   firewallUrl: "",
   authKey: "",
   blockMessage: DEFAULT_BLOCK_MESSAGE,
-  debug: true  // 默认开启 debug
+  debug: true,  // 默认开启 debug
+  timeout: DEFAULT_TIMEOUT_MS  // 默认 3 秒超时
 };
 var globalApi = null;  // 保存 api 实例用于访问配置
 var interceptorInstalled = false;
