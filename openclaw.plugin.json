@@ -33,11 +33,15 @@
       },
       "debug": {
         "type": "boolean",
-        "description": "Enable debug mode for detailed logging (default: false)"
+        "description": "Enable debug mode for detailed logging (default: true)"
       },
       "timeout": {
         "type": "number",
         "description": "Firewall API timeout in milliseconds (default: 3000)"
+      },
+      "undiciPath": {
+        "type": "string",
+        "description": "Custom path to undici module for interception (optional, auto-detected if not specified)"
       }
     },
     "required": ["firewallUrl", "authKey"]

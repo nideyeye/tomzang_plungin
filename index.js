@@ -26,7 +26,10 @@ function resolveConfig(rawConfig) {
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
     debug: typeof cfg.debug === "boolean" ? cfg.debug : true,  // 默认开启 debug
-    timeout: timeout
+    timeout: timeout,
+    undiciPath: typeof cfg.undiciPath === "string" && cfg.undiciPath.trim() !== ""
+      ? cfg.undiciPath.trim()
+      : ""
   };
 }
 
@@ -1144,7 +1147,8 @@ var plugin = {
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
       debug: { type: "boolean", default: true, description: "Enable debug mode (enabled by default for troubleshooting)" },
-      timeout: { type: "number", default: DEFAULT_TIMEOUT_MS, description: "Firewall API timeout in milliseconds (default: 3000)" }
+      timeout: { type: "number", default: DEFAULT_TIMEOUT_MS, description: "Firewall API timeout in milliseconds (default: 3000)" },
+      undiciPath: { type: "string", description: "Custom path to undici module (optional, auto-detected if not specified)" }
     },
     required: ["firewallUrl", "authKey"]
   },
@@ -1494,23 +1498,98 @@ function installGlobalFetchInterceptor() {
 
   // 🔧 尝试拦截 undici fetch（OpenClaw 使用的 HTTP 客户端）
   try {
-    // 尝试多种方式加载 undici
+    // 多策略加载 undici，按优先级尝试
     var undici = null;
-    var undiciLoadPaths = [
-      'undici',
-      '/opt/homebrew/lib/node_modules/openclaw/node_modules/undici'
-    ];
+    var loadedFrom = null;
+    var path = require('path');
 
-    for (var i = 0; i < undiciLoadPaths.length; i++) {
+    // 策略1: 官方推荐方式 - 直接通过 require('undici')
+    try {
+      undici = require('undici');
+      if (undici && undici.fetch) {
+        loadedFrom = 'official (require undici)';
+        console.log("[tomzang_plungin] Loaded undici via official require('undici')");
+      }
+    } catch (e) {
+      // 官方方式失败，继续尝试其他策略
+    }
+
+    // 策略2: 动态解析 - 尝试从 openclaw 的 node_modules 解析
+    if (!undici) {
       try {
-        undici = require(undiciLoadPaths[i]);
+        var openclawPath = require.resolve('openclaw');
+        var openclawDir = path.dirname(openclawPath);
+        var undiciViaOpenclaw = path.join(openclawDir, 'node_modules', 'undici');
+        undici = require(undiciViaOpenclaw);
         if (undici && undici.fetch) {
-          console.log("[tomzang_plungin] Loaded undici from:", undiciLoadPaths[i]);
-          break;
+          loadedFrom = 'dynamic (via openclaw node_modules): ' + undiciViaOpenclaw;
+          console.log("[tomzang_plungin] Loaded undici from:", loadedFrom);
         }
       } catch (e) {
-        // 继续尝试下一个路径
+        // openclaw 解析失败，继续尝试
       }
+    }
+
+    // 策略3: 常见系统路径 - 按不同系统和安装方式尝试
+    if (!undici) {
+      var commonPaths = [
+        // Homebrew (Apple Silicon)
+        '/opt/homebrew/lib/node_modules/openclaw/node_modules/undici',
+        // Homebrew (Intel)
+        '/usr/local/lib/node_modules/openclaw/node_modules/undici',
+        // npm 全局安装
+        '/usr/local/lib/node_modules/openclaw/node_modules/undici',
+        // npm 用户级安装
+        path.join(require('os').homedir(), '.npm-global/lib/node_modules/openclaw/node_modules/undici'),
+        path.join(require('os').homedir(), '.npm-global/node_modules/openclaw/node_modules/undici'),
+        // nvm/nfv 安装
+        path.join(require('os').homedir(), '.nvm/versions/node/v18/lib/node_modules/openclaw/node_modules/undici'),
+        path.join(require('os').homedir(), '.nvm/versions/node/v20/lib/node_modules/openclaw/node_modules/undici'),
+        path.join(require('os').homedir(), '.nvm/versions/node/v22/lib/node_modules/openclaw/node_modules/undici'),
+        // fnm
+        path.join(require('os').homedir(), '.fnm/current/lib/node_modules/openclaw/node_modules/undici'),
+        // Windows (如果在 Windows 环境下)
+        process.env.APPDATA && path.join(process.env.APPDATA, 'npm/node_modules/openclaw/node_modules/undici'),
+        process.env.APPDATA && path.join(process.env.USERPROFILE || '', 'AppData/Roaming/npm/node_modules/openclaw/node_modules/undici'),
+        // Linux 系统级
+        '/usr/lib/node_modules/openclaw/node_modules/undici',
+        '/usr/lib64/node_modules/openclaw/node_modules/undici'
+      ].filter(function(p) { return p != null; }); // 过滤掉 null 路径
+
+      for (var i = 0; i < commonPaths.length; i++) {
+        try {
+          undici = require(commonPaths[i]);
+          if (undici && undici.fetch) {
+            loadedFrom = 'common path: ' + commonPaths[i];
+            console.log("[tomzang_plungin] Loaded undici from:", loadedFrom);
+            break;
+          }
+        } catch (e) {
+          // 继续尝试下一个路径
+        }
+      }
+    }
+
+    // 策略4: 用户配置路径 - 从 config 读取用户手动指定的路径
+    if (!undici && globalConfig && globalConfig.undiciPath) {
+      try {
+        undici = require(globalConfig.undiciPath);
+        if (undici && undici.fetch) {
+          loadedFrom = 'user config: ' + globalConfig.undiciPath;
+          console.log("[tomzang_plungin] Loaded undici from:", loadedFrom);
+        }
+      } catch (e) {
+        console.log("[tomzang_plungin] Failed to load undici from user config path:", globalConfig.undiciPath, e.message);
+      }
+    }
+
+    // 如果所有策略都失败，输出警告
+    if (!undici || !undici.fetch) {
+      console.log("[tomzang_plungin] WARNING: Could not load undici module. Only globalThis.fetch will be intercepted.");
+      console.log("[tomzang_plungin] To enable undici interception, either:");
+      console.log("[tomzang_plungin]   1. Ensure undici is available via require('undici')");
+      console.log("[tomzang_plungin]   2. Install undici globally: npm install -g undici");
+      console.log("[tomzang_plungin]   3. Set undiciPath in config to specify the path manually");
     }
 
     if (undici && undici.fetch) {
