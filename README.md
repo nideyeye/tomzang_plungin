@@ -44,7 +44,7 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 | `firewallUrl` | string | **是** | 无 | 防火墙 API 地址，用于内容安全检测 |
 | `authKey` | string | **是** | 无 | 防火墙 API 认证密钥 |
 | `blockMessage` | string | 否 | `当前请求包含敏感关键字，已被安全组件拦截` | 自定义拦截提示语（当无命中规则时显示） |
-| `debug` | boolean | 否 | `false` | 是否启用调试模式，开启后会输出详细日志 |
+| `debug` | string | 否 | `false` | 是否启用调试模式，开启后会输出详细日志。支持 `true`/`false` |
 | `timeout` | number | 否 | `3000` | 防火墙 API 超时时间（毫秒） |
 | `undiciPath` | string | 否 | 自动检测 | 自定义 undici 模块路径，用于拦截请求（未指定时自动检测） |
 
