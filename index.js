@@ -17,6 +17,14 @@ function resolveConfig(rawConfig) {
   if (typeof cfg.timeout === "number" && cfg.timeout > 0) {
     timeout = Math.floor(cfg.timeout);
   }
+  // 解析 debug，支持 boolean 和 string 类型（"true"/"false"）
+  var debug = false;
+  if (typeof cfg.debug === "boolean") {
+    debug = cfg.debug;
+  } else if (typeof cfg.debug === "string") {
+    var trimmed = cfg.debug.trim().toLowerCase();
+    debug = trimmed === "true";
+  }
   return {
     firewallUrl: buildFullFirewallUrl(cfg.firewallUrl),
     authKey: typeof cfg.authKey === "string" && cfg.authKey.trim() !== ""
@@ -25,7 +33,7 @@ function resolveConfig(rawConfig) {
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
-    debug: typeof cfg.debug === "boolean" ? cfg.debug : false,  // 默认关闭 debug
+    debug: debug,
     timeout: timeout,
     undiciPath: typeof cfg.undiciPath === "string" && cfg.undiciPath.trim() !== ""
       ? cfg.undiciPath.trim()
