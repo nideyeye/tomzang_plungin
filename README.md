@@ -31,7 +31,9 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
   "firewallUrl": "http://your-firewall-host:port/api/firewall/openclaw/validate",
   "authKey": "your-auth-key",
   "blockMessage": "自定义拦截提示语",
-  "debug": false
+  "debug": false,
+  "timeout": 3000,
+  "undiciPath": "/path/to/undici"
 }
 ```
 
@@ -43,6 +45,8 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 | `authKey` | string | **是** | 无 | 防火墙 API 认证密钥 |
 | `blockMessage` | string | 否 | `当前请求包含敏感关键字，已被安全组件拦截` | 自定义拦截提示语（当无命中规则时显示） |
 | `debug` | boolean | 否 | `false` | 是否启用调试模式，开启后会输出详细日志 |
+| `timeout` | number | 否 | `3000` | 防火墙 API 超时时间（毫秒） |
+| `undiciPath` | string | 否 | 自动检测 | 自定义 undici 模块路径，用于拦截请求（未指定时自动检测） |
 
 > **重要**：`firewallUrl` 和 `authKey` 为必填项。如果未配置，插件将在启动时上报错误，并跳过所有防火墙检测功能（仅保留基本的生命周期钩子日志记录）。
 
@@ -74,7 +78,7 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 仓库根目录提供了 `install.sh`，会自动下载并部署插件，写入 `~/.openclaw/openclaw.json` 中的 `plugins.entries.tomzang_plungin.config`。
 
 ```bash
-./install.sh <firewallUrl> <authKey> [blockMessage] [debug]
+./install.sh <firewallUrl> <authKey> [blockMessage] [debug] [timeout] [undiciPath]
 ```
 
 参数说明：
@@ -85,6 +89,8 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 | `authKey` | 是 | `authKey` | 防火墙 API 认证密钥 |
 | `blockMessage` | 否 | `blockMessage` | 自定义拦截提示语 |
 | `debug` | 否 | `debug` | 是否开启调试日志，`true`/`false` |
+| `timeout` | 否 | `timeout` | 防火墙 API 超时时间（毫秒），默认 3000 |
+| `undiciPath` | 否 | `undiciPath` | 自定义 undici 模块路径，未指定时自动检测 |
 
 示例：
 
@@ -110,6 +116,8 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 
 1. 设置铸盾防火墙 url `openclaw config set plugins.entries.tomzang_plungin.config.firewallUrl "${铸盾防火墙地址}"`
 2. 配置对应的 key `openclaw config set plugins.entries.tomzang_plungin.config.authKey "${铸盾 openclaw key}"`
-3. 进入插件目录，执行离线安装命令 `openclaw plugins install -l .`
-4. 重启 gateway 应用 `openclaw gateway restart`
-5. 开启 debug 模式 `openclaw config set plugins.entries.tomzang_plungin.config.debug true`
+3. （可选）配置超时时间 `openclaw config set plugins.entries.tomzang_plungin.config.timeout 3000`
+4. （可选）配置 undici 路径 `openclaw config set plugins.entries.tomzang_plungin.config.undiciPath "/path/to/undici"`
+5. 进入插件目录，执行离线安装命令 `openclaw plugins install -l .`
+6. 重启 gateway 应用 `openclaw gateway restart`
+7. 开启 debug 模式 `openclaw config set plugins.entries.tomzang_plungin.config.debug true`

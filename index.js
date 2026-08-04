@@ -25,7 +25,7 @@ function resolveConfig(rawConfig) {
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
-    debug: typeof cfg.debug === "boolean" ? cfg.debug : true,  // 默认开启 debug
+    debug: typeof cfg.debug === "boolean" ? cfg.debug : false,  // 默认关闭 debug
     timeout: timeout,
     undiciPath: typeof cfg.undiciPath === "string" && cfg.undiciPath.trim() !== ""
       ? cfg.undiciPath.trim()
@@ -1146,7 +1146,7 @@ var plugin = {
       firewallUrl: { type: "string", description: "Firewall API host and port, e.g. http://localhost:8080 (required, path /api/firewall/openclaw/validate will be appended automatically)" },
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
-      debug: { type: "boolean", default: true, description: "Enable debug mode (enabled by default for troubleshooting)" },
+      debug: { type: "boolean", default: false, description: "Enable debug mode (disabled by default)" },
       timeout: { type: "number", default: DEFAULT_TIMEOUT_MS, description: "Firewall API timeout in milliseconds (default: 3000)" },
       undiciPath: { type: "string", description: "Custom path to undici module (optional, auto-detected if not specified)" }
     },
@@ -1342,7 +1342,7 @@ var globalConfig = {
   firewallUrl: "",
   authKey: "",
   blockMessage: DEFAULT_BLOCK_MESSAGE,
-  debug: true,  // 默认开启 debug
+  debug: false,  // 默认关闭 debug
   timeout: DEFAULT_TIMEOUT_MS  // 默认 3 秒超时
 };
 var globalApi = null;  // 保存 api 实例用于访问配置
