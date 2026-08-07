@@ -420,11 +420,47 @@ function stripTimestampPrefix(text) {
 }
 
 
-// 判断是否为内置命令（以 / 开头的指令，如 /reset, /help, /clear 等）
+// OpenClaw 内置命令白名单（只对这些命令跳过审计）
+var BUILT_IN_COMMANDS = [
+  "/new",
+  "/reset",
+  "/help",
+  "/clear",
+  "/config",
+  "/exit",
+  "/quit",
+  "/sessions",
+  "/models",
+  "/providers",
+  "/agent",
+  "/session",
+  "/continue",
+  "/version",
+  "/debug",
+  "/verbose"
+];
+
+// 判断是否为内置命令（仅对白名单中的命令跳过审计）
 function isBuiltInCommand(text) {
   if (!text || typeof text !== "string") return false;
   var trimmed = text.trim();
-  return trimmed.length > 1 && trimmed[0] === "/";
+
+  // 必须以 / 开头且长度大于1
+  if (trimmed.length <= 1 || trimmed[0] !== "/") return false;
+
+  // 提取命令部分（处理带参数的情况，如 /config set key=value）
+  var parts = trimmed.split(/\s+/);
+  var command = parts[0];
+
+  // 检查是否在白名单中
+  for (var i = 0; i < BUILT_IN_COMMANDS.length; i++) {
+    if (command === BUILT_IN_COMMANDS[i]) {
+      return true;
+    }
+  }
+
+  // 不在白名单中的 / 开头文本仍然需要审计
+  return false;
 }
 
 // 判断是否为系统内部操作触发的请求（无需防火墙检测）
