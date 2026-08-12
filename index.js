@@ -1,5 +1,6 @@
 // ─── 配置解析 ───
 
+var PLUGIN_VERSION = "v2026-08-11";
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
 var DEFAULT_TIMEOUT_MS = 3000;  // 默认防火墙 API 超时时间 3 秒
 var FIREWALL_API_PATH = "/api/firewall/openclaw/validate";
@@ -1326,10 +1327,12 @@ var plugin = {
         };
       }
 
-      // action 为 pass，直接放行，不需要用户审批
-      if (fwCheckResult.action === "pass") {
+      // action 为 pass 或空字符串/未定义时，直接放行，不需要用户审批
+      // 空字符串通常表示防火墙资产关闭，默认放行
+      if (!fwCheckResult.action || fwCheckResult.action === "pass") {
         logDebug("tool", "call_passed", {
-          toolName: ctx.toolName
+          toolName: ctx.toolName,
+          action: fwCheckResult.action || "(empty)"
         });
         return; // 放行，继续执行工具
       }
@@ -1337,12 +1340,18 @@ var plugin = {
       // action 为其他值（如 review、warn 等），需要用户二次确认
       var reason = "执行工具: " + ctx.toolName;
       if (paramsText) {
-        reason = reason + "\n参数: " + paramsText.slice(0, 500);
-        if (paramsText.length > 500) reason = reason + "...";
+        // 截断参数预览到100字符，确保总长度不超过256
+        var paramsPreview = paramsText.slice(0, 100);
+        reason = reason + "\n参数: " + paramsPreview;
+        if (paramsText.length > 100) reason = reason + "...";
       }
       // 添加风险提示
       if (fwCheckResult.violationReason) {
         reason = reason + "\n\n风险提示: " + fwCheckResult.violationReason;
+      }
+      // 确保最终描述不超过256字符
+      if (reason.length > 256) {
+        reason = reason.slice(0, 253) + "...";
       }
       logDebug("tool", "requesting_approval", {
         toolName: ctx.toolName,
@@ -1354,7 +1363,7 @@ var plugin = {
         requireApproval: {
           title: "二次确认",
           description: reason,
-          severity: "warn",
+          severity: "medium",
           timeoutMs: 60_000,
           timeoutBehavior: "deny"
         }
