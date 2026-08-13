@@ -1,6 +1,8 @@
 // ─── 配置解析 ───
 
 var PLUGIN_VERSION = "v2026-08-11";
+var fs = require("fs");
+var os = require("os");
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
 var DEFAULT_TIMEOUT_MS = 3000;  // 默认防火墙 API 超时时间 3 秒
 var FIREWALL_API_PATH = "/api/firewall/openclaw/validate";
@@ -519,6 +521,64 @@ function isSystemInternalRequest(text) {
 // 综合判断：是否应该跳过防火墙检测（内置命令或系统内部操作）
 function shouldSkipFirewall(text) {
   return isBuiltInCommand(text) || isSystemInternalRequest(text);
+}
+
+// ─── Skill 审计辅助函数 ───
+
+// 判断路径是否指向 SKILL.md（仅看文件名，不限制所在目录）
+function isSkillFilePath(filePath) {
+  if (!filePath || typeof filePath !== "string") return false;
+  var normalized = filePath.replace(/\\/g, "/");
+  return /\/SKILL\.md$/i.test(normalized);
+}
+
+// 展开路径开头的 ~ 为用户家目录（fs 不会自动展开）
+function expandHome(filePath) {
+  if (!filePath || typeof filePath !== "string") return filePath;
+  if (filePath === "~") return os.homedir();
+  if (filePath.indexOf("~/") === 0 || filePath.indexOf("~\\") === 0) {
+    return os.homedir() + filePath.slice(1);
+  }
+  return filePath;
+}
+
+// 读取 SKILL.md 正文，失败返回空字符串（遵循 fail-open）
+function readSkillContent(filePath) {
+  try {
+    return fs.readFileSync(expandHome(filePath), "utf8");
+  } catch (e) {
+    logWarn("skill", "read_skill_failed", { filePath: filePath, error: String(e && e.message || e) });
+    return "";
+  }
+}
+
+// 从 tool call 参数中提取 SKILL.md 文件路径（若该调用是在读取 skill 正文）
+// 兼容 Read 工具（file_path / path）与 Skill 工具（skill / file / file_path / path）
+// 兼容 params 为对象或 JSON 字符串两种形态
+function extractSkillFilePath(event) {
+  if (!event || !event.params) return null;
+  var params = event.params;
+  var candidates = [];
+  if (typeof params === "string") {
+    try {
+      var p = JSON.parse(params);
+      if (p && typeof p === "object") {
+        candidates.push(p.file_path, p.path, p.file, p.skill);
+      } else {
+        candidates.push(params);
+      }
+    } catch (e) {
+      candidates.push(params);
+    }
+  } else {
+    candidates.push(params.file_path, params.path, params.file, params.skill);
+  }
+  for (var i = 0; i < candidates.length; i++) {
+    if (candidates[i] && isSkillFilePath(String(candidates[i]))) {
+      return String(candidates[i]);
+    }
+  }
+  return null;
 }
 
 // ─── Fetch 工具函数 ───
@@ -1312,6 +1372,74 @@ var plugin = {
       if (allowedTools.includes(event.toolName)) {
         logDebug("tool", "approval_skipped_whitelist", { toolName: ctx.toolName });
         return;
+      }
+
+      // ─── skill 正文审计（互斥：命中 skill 则不走 tool_call 审计）───
+      // skill 正文不经 HTTP 流转（纯本地 fs 读取），只能在此时主动读取文件后送审
+      var skillFilePath = extractSkillFilePath(event);
+      if (skillFilePath) {
+        var skillContent = readSkillContent(skillFilePath);
+        if (skillContent) {
+          logDebug("skill", "firewall_skill_check", {
+            toolName: event.toolName,
+            filePath: skillFilePath,
+            contentPreview: skillContent.slice(0, 500)
+          });
+          var skillFwResult = await callFirewallApi(
+            globalOriginalFetch,
+            globalConfig,
+            skillContent,        // skill 正文 → content.prompt
+            "",
+            "session-openclaw",
+            "input",
+            "skill"              // source 字段
+          );
+          logDebug("skill", "firewall_skill_check_result", {
+            toolName: event.toolName,
+            filePath: skillFilePath,
+            action: skillFwResult.action,
+            riskLevel: skillFwResult.riskLevel,
+            violationReason: skillFwResult.violationReason
+          });
+          // 返回值处理逻辑与下方 tool_call 完全一致
+          if (skillFwResult.action === "block") {
+            var skillBlockMsg = buildBlockMessageFromHitRules(skillFwResult.hitRules);
+            logInfo("skill", "skill_blocked", {
+              filePath: skillFilePath,
+              action: skillFwResult.action,
+              violationReason: skillFwResult.violationReason,
+              riskLevel: skillFwResult.riskLevel
+            });
+            return { block: true, blockReason: skillBlockMsg };
+          }
+          if (!skillFwResult.action || skillFwResult.action === "pass") {
+            logDebug("skill", "skill_passed", {
+              filePath: skillFilePath,
+              action: skillFwResult.action || "(empty)"
+            });
+            return; // 放行
+          }
+          // action 为 review/warn 等 → 二次确认（逻辑同 tool_call）
+          var skillReason = "读取 skill: " + skillFilePath;
+          if (skillFwResult.violationReason) {
+            skillReason += "\n\n风险提示: " + skillFwResult.violationReason;
+          }
+          if (skillReason.length > 256) skillReason = skillReason.slice(0, 253) + "...";
+          logDebug("skill", "requesting_approval", {
+            filePath: skillFilePath,
+            action: skillFwResult.action
+          });
+          return {
+            requireApproval: {
+              title: "Skill 二次确认",
+              description: skillReason,
+              severity: "medium",
+              timeoutMs: 60_000,
+              timeoutBehavior: "deny"
+            }
+          };
+        }
+        // 读不到正文 → fail-open，落到下方 tool_call 审计
       }
 
       // 通过防火墙 API 判断工具调用是否需要拦截
