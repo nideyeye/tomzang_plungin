@@ -103,6 +103,10 @@ async function callFirewallApi(fetchFn, config, prompt, response, sessionId, sta
     trace_id: traceId,
     stage: stage || "input",
     source: source || "user_prompt",
+    source_user: (function () {
+      var v = process.env.GROUP_CHAT_ALLOWED_SENDERS;
+      return (typeof v === "string" || typeof v === "number") ? String(v) : "";
+    })(),
     content_type: "text",
     content: {
       prompt: prompt || "",
