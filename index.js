@@ -335,6 +335,29 @@ function extractTextFromContentArray(contentArray) {
   return texts.join("\n") || JSON.stringify(contentArray);
 }
 
+// 提示器注入的标签，连同内部内容一并移除（非贪婪，匹配所有出现）
+// 这些标签由渲染层注入，不属于用户真实输入，送审计前需要剥离
+var INJECTED_TAG_PATTERNS = [
+  /<relevant-memories>[\s\S]*?<\/relevant-memories>/g,
+  /<inherited-rules>[\s\S]*?<\/inherited-rules>/g,
+  /<derived-focus>[\s\S]*?<\/derived-focus>/g,
+  /<self-improvement-reminder>[\s\S]*?<\/self-improvement-reminder>/g
+];
+
+/**
+ * 移除提示器注入的四类标签及其内部内容
+ * 非贪婪 + 全局匹配：删除每种标签的所有出现，安全处理多次/相邻/混合出现
+ * 仅处理标准闭合标签 <tag>...</tag>，不处理自闭合或未闭合变体
+ */
+function stripInjectedTags(text) {
+  if (!text || typeof text !== "string") return text || "";
+  for (var i = 0; i < INJECTED_TAG_PATTERNS.length; i++) {
+    text = text.replace(INJECTED_TAG_PATTERNS[i], "");
+  }
+  // 合并因删标签而残留的多余空行，避免大段空白
+  return text.replace(/\n{3,}/g, "\n\n");
+}
+
 /**
  * 去除系统前缀 / 元数据块，提取末尾真正的用户输入
  *
@@ -347,9 +370,15 @@ function extractTextFromContentArray(contentArray) {
  *      ou_xxx: 实际消息内容
  *
  * 策略：先处理飞书格式，再找最后一个 ``` 代码块结束标记后面的内容；
- *       再去掉可能的时间戳行前缀 [Mon 2026-04-20 18:08 GMT+8]
+ *       再去掉可能的时间戳行前缀 [Mon 2026-04-20 18:08 GMT+8]；
+ *       最后统一剥离提示器注入的标签（stripInjectedTags）
  */
 function stripMetadataPrefix(text) {
+  return stripInjectedTags(stripMetadataPrefixRaw(text)).trim();
+}
+
+// 原有的元数据 / 前缀剥离逻辑（不含注入标签处理）
+function stripMetadataPrefixRaw(text) {
   if (!text || typeof text !== "string") return text || "";
 
   // 找最后一个 ``` 标记的位置（元数据代码块的结束）
