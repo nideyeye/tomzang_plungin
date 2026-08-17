@@ -8,6 +8,7 @@ OpenCode 插件 — 记录用户输入和工具调用日志，并集成 OpenClaw
 - 捕获所有工具调用（bash、file_read、file_edit、glob 等），输出 `[TOOL:名称]` 日志和参数摘要
 - 捕获工具执行结果，输出 `[TOOL_RESULT:名称]` 日志
 - 集成防火墙 API，对用户输入、工具调用和工具结果进行安全检测
+- Skill 按需审计：agent 调用 `skill` 工具加载技能时，读取对应 `SKILL.md` 全文送防火墙检测（`source=skill`），违规则阻止该技能加载
 - 检测到违规内容时拦截请求，向用户展示拦截原因
 - 插件加载/卸载时打印状态
 
@@ -224,6 +225,10 @@ rm -rf ~/.config/opencode/plugins/tomzang_plungin
 - 工具不执行
 - 向用户展示拦截原因
 
+**Skill 加载被拦截时：**
+- 该 skill 不加载，`SKILL.md` 内容不会进入模型上下文
+- 向用户展示拦截原因，拦截原因同时告知模型（会话继续，可恢复）
+
 **工具结果被拦截时：**
 - 工具输出替换为拦截提示
 - 向用户展示拦截原因
@@ -259,6 +264,10 @@ rm -rf ~/.config/opencode/plugins/tomzang_plungin
 
 工具调用 → tool.execute.before hook
   ├─ 打印 [TOOL:name] 日志
+  ├─ 调用 skill 工具时：查找并读取 SKILL.md → 防火墙 API (source=skill, stage=input)
+  │   ├─ pass → 放行，skill 正常加载
+  │   ├─ block → 返回 { block: true, blockReason } 阻止加载
+  │   └─ 未找到 SKILL.md 或审计失败 → 落入下方通用 tool_call 审计
   ├─ 防火墙 API (source=tool_call, stage=input)
   │   ├─ pass → 放行，工具正常执行
   │   └─ block → 返回 { block: true, blockReason } 阻止执行
@@ -282,7 +291,7 @@ rm -rf ~/.config/opencode/plugins/tomzang_plungin
   "session_id": "<sessionID>",
   "trace_id": "<traceID>",
   "stage": "input | output",
-  "source": "text | tool_call | tool_result",
+  "source": "text | tool_call | tool_result | skill",
   "content_type": "text",
   "content": {
     "prompt": "<用户输入或工具名>",
@@ -298,8 +307,20 @@ rm -rf ~/.config/opencode/plugins/tomzang_plungin
 | `text` | `input` | 用户消息文本 | 全链路（内容合规 + 敏感内容 + 提示词攻击） |
 | `tool_call` | `input` | 工具名 | ToolGuard（检查工具调用参数） |
 | `tool_result` | `output` | 工具名 | ToolGuard（检查工具返回结果） |
+| `skill` | `input` | SKILL.md 文件全文 | Skill 审计（agent 调用 `skill` 工具时按需触发） |
 
-响应中 `data.result` 取值：`pass`（放行）、`block`（拦截）、`confirm`（二次确认）。
+**Skill 审计细节：**
+
+- 仅在 agent 实际调用 `skill` 工具加载某技能时触发，未被调用的 skill 不审计
+- 按项目级 → 全局级顺序在以下路径查找 `<skill名>/SKILL.md`（与 OpenCode 官方 skill 发现路径一致，项目级优先）：
+  - 项目级：`.opencode/skill/`、`.opencode/skills/`、`.claude/skills/`、`.agents/skills/`
+  - 全局级：`~/.config/opencode/skill/`、`~/.config/opencode/skills/`、`~/.claude/skills/`、`~/.agents/skills/`
+- 找到文件后读取全文放入 `content.prompt`，以 `source=skill` 送防火墙；`block` 则阻止该 skill 加载，`pass` 则放行
+- 未找到 `SKILL.md`（非文件型 skill）或审计失败时，回退到通用 `tool_call` 审计，不影响正常使用
+
+响应中 `data.result` 取值：`pass`（放行）、`block`（拦截）、`confirm`（二次确认）。`data.action` 取值：`block`（拦截）、`pass`（放行）、空字符串（通常表示防火墙资产关闭，判断逻辑同 `pass`）。
+
+**拦截判断规则**：`data.result` 为 `block` 或 `data.action` 为 `block` 任一命中即拦截；`action` 为空字符串/未定义/`pass` 时不影响判断，最终以 `result` 为准。
 
 ## 技术细节
 
