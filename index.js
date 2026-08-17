@@ -5,6 +5,10 @@ import { execSync } from "child_process";
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感信息，已被安全组件拦截";
 var BLOCK_MARKER = "[TOMZANG_FW_BLOCKED]";
 
+// OpenCode skill 发现路径（官方手册定义）：项目级基于插件 directory，全局级基于 $HOME
+var PROJECT_SKILL_DIRS = [".opencode/skill", ".opencode/skills", ".claude/skills", ".agents/skills"];
+var GLOBAL_SKILL_DIRS = [".config/opencode/skill", ".config/opencode/skills", ".claude/skills", ".agents/skills"];
+
 function ts() {
   return new Date().toLocaleString("zh-CN", { hour12: false });
 }
@@ -62,6 +66,14 @@ function buildHitRulesText(hitRules) {
     );
   }
   return lines.join("\n");
+}
+
+// 判断防火墙返回是否拦截：result=block 或 action=block 任一命中即拦截；
+// action 可能为空字符串（通常表示防火墙资产关闭），判断逻辑同 pass，最终以 result 为准
+function isFirewallBlocked(fwData) {
+  if (!fwData) return false;
+  if (fwData.action === "block") return true;
+  return fwData.result === "block";
 }
 
 function buildBlockResponse(fwData, defaultMsg) {
@@ -425,6 +437,32 @@ async function readConfigFile() {
   }
 }
 
+// 按项目级 → 全局级顺序查找指定名称 skill 的 SKILL.md，返回第一个命中的完整路径
+async function findSkillFile(skillName, projectDir) {
+  if (!skillName) return null;
+  // skill 名来自模型生成的工具参数，包含路径分隔符或 .. 时视为非法，防止路径穿越
+  if (skillName.indexOf("/") !== -1 || skillName.indexOf("\\") !== -1 || skillName.indexOf("..") !== -1) {
+    return null;
+  }
+  var bases = [];
+  var dir = projectDir || process.cwd();
+  for (var i = 0; i < PROJECT_SKILL_DIRS.length; i++) {
+    bases.push(dir + "/" + PROJECT_SKILL_DIRS[i]);
+  }
+  var home = process.env.HOME || os.homedir();
+  for (var j = 0; j < GLOBAL_SKILL_DIRS.length; j++) {
+    bases.push(home + "/" + GLOBAL_SKILL_DIRS[j]);
+  }
+  for (var k = 0; k < bases.length; k++) {
+    var skillPath = bases[k] + "/" + skillName + "/SKILL.md";
+    try {
+      await fs.promises.access(skillPath);
+      return skillPath;
+    } catch (_) {}
+  }
+  return null;
+}
+
 export default async function TomzangPlungin({ project, directory, client }) {
   // 优先级: 配置文件 > 环境变量 > 默认值
   var fileConfig = await readConfigFile();
@@ -579,7 +617,7 @@ export default async function TomzangPlungin({ project, directory, client }) {
           "text",
           input.sessionID
         );
-        if (fwData.result === "block") {
+        if (isFirewallBlocked(fwData)) {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
           logForce(
             "[" + ts() + "] [BLOCK] 用户输入被拦截: " + (fwData.violation_reason || "")
@@ -678,6 +716,59 @@ export default async function TomzangPlungin({ project, directory, client }) {
 
       if (!hasFirewall) return;
 
+      // Skill 专项审计：agent 调用原生 skill 工具时，读取对应 SKILL.md 全文送防火墙（source=skill）
+      if (input.tool === "skill" && output.args && output.args.name) {
+        try {
+          var skillFile = await findSkillFile(output.args.name, directory);
+          if (skillFile) {
+            var skillContent = await fs.promises.readFile(skillFile, "utf-8");
+            var fwSkill = await callFirewallApi(
+              config,
+              skillContent,
+              "",
+              "skill",
+              input.sessionID
+            );
+            if (isFirewallBlocked(fwSkill)) {
+              var skillBlockMsg = buildBlockResponse(fwSkill, config.blockMessage);
+              logForce(
+                "[" +
+                  ts() +
+                  "] [BLOCK] Skill 加载被拦截: " +
+                  output.args.name +
+                  " - " +
+                  (fwSkill.violation_reason || "")
+              );
+              logForce(
+                "[" + ts() + "] [BLOCK] 风险等级: " + (fwSkill.risk_level || 0)
+              );
+              logForce(
+                "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwSkill.hit_rules || [])
+              );
+
+              // 显示 Toast
+              await showBlockToast(fwSkill, "Skill: " + output.args.name);
+
+              // 仅阻断该 skill 加载，不中止会话：skill 加载失败可恢复，blockReason 会告知模型原因
+              return { block: true, blockReason: skillBlockMsg };
+            }
+            // 审计通过：完整文件内容已以 source=skill 送审，跳过通用 tool_call 审计
+            return;
+          }
+          // 未找到 SKILL.md（非文件型 skill），落入下方通用 tool_call 审计
+        } catch (e) {
+          // 审计失败不阻断 skill 加载（fail-open），落入下方通用 tool_call 审计
+          log(
+            "[" +
+              ts() +
+              "] [WARN] Skill 审计失败: " +
+              output.args.name +
+              " - " +
+              (e.message || e)
+          );
+        }
+      }
+
       var toolCommand = buildToolCommand(input.tool, output.args);
       try {
         var fwData = await callFirewallApi(
@@ -687,7 +778,7 @@ export default async function TomzangPlungin({ project, directory, client }) {
           "tool_call",
           input.sessionID
         );
-        if (fwData.result === "block") {
+        if (isFirewallBlocked(fwData)) {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
           logForce(
             "[" +
@@ -758,7 +849,7 @@ export default async function TomzangPlungin({ project, directory, client }) {
           "tool_result",
           input.sessionID
         );
-        if (fwData.result === "block") {
+        if (isFirewallBlocked(fwData)) {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
           logForce(
             "[" +
