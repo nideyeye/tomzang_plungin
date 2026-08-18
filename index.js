@@ -1,6 +1,6 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-08-11";
+var PLUGIN_VERSION = "v2026-08-18";
 var fs = require("fs");
 var os = require("os");
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
@@ -1345,6 +1345,12 @@ var plugin = {
     console.log("[tomzang_plungin] Configuration validated successfully");
     console.log("[tomzang_plungin] Fetch interceptor status:", interceptorInstalled ? "ACTIVE" : "INACTIVE");
 
+    // 模块加载阶段 globalConfig.undiciPath 尚未就绪，register 阶段携带真实配置路径重试拦截
+    if (!undiciInterceptorInstalled && config.undiciPath) {
+      console.log("[tomzang_plungin] Retrying undici interception with configured undiciPath:", config.undiciPath);
+      tryInstallUndiciInterceptor(config.undiciPath);
+    }
+
     // ─── 生命周期钩子（日志记录） ───
     api.on("before_prompt_build", async function (event, ctx) {
       console.log("[tomzang_plungin] [hook] before_prompt_build agentId=" + ctx.agentId);
@@ -1557,8 +1563,12 @@ var globalConfig = {
   authKey: "",
   blockMessage: DEFAULT_BLOCK_MESSAGE,
   debug: false,  // 默认关闭 debug
-  timeout: DEFAULT_TIMEOUT_MS  // 默认 3 秒超时
+  timeout: DEFAULT_TIMEOUT_MS,  // 默认 3 秒超时
+  undiciPath: ""
 };
+
+// 记录 undici 拦截器是否已成功安装（可被 register 阶段复用）
+var undiciInterceptorInstalled = false;
 var globalApi = null;  // 保存 api 实例用于访问配置
 var interceptorInstalled = false;
 var fetchCallId = 0;
@@ -1710,12 +1720,29 @@ function installGlobalFetchInterceptor() {
   globalThis.fetch = wrappedFetch;
   globalThis[FETCH_WRAPPED_KEY] = true;
 
+  interceptorInstalled = true;
+
   // 🔧 尝试拦截 undici fetch（OpenClaw 使用的 HTTP 客户端）
+  tryInstallUndiciInterceptor();
+
+  console.log("[tomzang_plungin] Global fetch interceptor installed at module load time");
+}
+
+// 尝试加载并拦截 undici.fetch。可接受用户配置的 undiciPath 作为候选路径。
+// 模块加载时 globalConfig 尚未就绪（undiciPath 为空），因此此时仅尝试自动探测；
+// 插件 register 阶段会传入真实配置路径再次尝试。
+function tryInstallUndiciInterceptor(undiciPath) {
+  if (undiciInterceptorInstalled) {
+    console.log("[tomzang_plungin] Undici interceptor already installed, skipping retry");
+    return;
+  }
+
+  // 多策略加载 undici，按优先级尝试
+  var undici = null;
+  var loadedFrom = null;
+  var path = require('path');
+
   try {
-    // 多策略加载 undici，按优先级尝试
-    var undici = null;
-    var loadedFrom = null;
-    var path = require('path');
 
     // 策略1: 官方推荐方式 - 直接通过 require('undici')
     try {
@@ -1784,16 +1811,18 @@ function installGlobalFetchInterceptor() {
       }
     }
 
-    // 策略4: 用户配置路径 - 从 config 读取用户手动指定的路径
-    if (!undici && globalConfig && globalConfig.undiciPath) {
+    // 策略4: 用户配置路径 - 优先使用传入参数，其次从 globalConfig 读取
+    // 注意：模块加载时 globalConfig.undiciPath 为空，register 阶段会传入真实路径
+    var userUndiciPath = undiciPath || (globalConfig && globalConfig.undiciPath);
+    if (!undici && userUndiciPath) {
       try {
-        undici = require(globalConfig.undiciPath);
+        undici = require(userUndiciPath);
         if (undici && undici.fetch) {
-          loadedFrom = 'user config: ' + globalConfig.undiciPath;
+          loadedFrom = 'user config: ' + userUndiciPath;
           console.log("[tomzang_plungin] Loaded undici from:", loadedFrom);
         }
       } catch (e) {
-        console.log("[tomzang_plungin] Failed to load undici from user config path:", globalConfig.undiciPath, e.message);
+        console.log("[tomzang_plungin] Failed to load undici from user config path:", userUndiciPath, e.message);
       }
     }
 
@@ -1913,6 +1942,7 @@ function installGlobalFetchInterceptor() {
 
       // 替换 undici.fetch
       undici.fetch = wrappedUndiciFetch;
+      undiciInterceptorInstalled = true;
       console.log("[tomzang_plungin] Undici fetch interceptor installed successfully");
     } else {
       console.log("[tomzang_plungin] Undici not available in any expected path");
@@ -1920,10 +1950,6 @@ function installGlobalFetchInterceptor() {
   } catch (e) {
     console.log("[tomzang_plungin] Undici interception failed:", String(e && e.message || e));
   }
-
-  interceptorInstalled = true;
-
-  console.log("[tomzang_plungin] Global fetch interceptor installed at module load time");
 }
 
 // ─── 立即安装拦截器（模块加载时执行） ───
