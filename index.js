@@ -1,6 +1,6 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-08-18";
+var PLUGIN_VERSION = "v2026-08-19";
 var fs = require("fs");
 var os = require("os");
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
@@ -1394,7 +1394,7 @@ var plugin = {
           var skillFwResult = await callFirewallApi(
             globalOriginalFetch,
             globalConfig,
-            skillContent,        // skill 正文 → content.prompt
+            JSON.stringify([{ path: "SKILL.md", content: skillContent }]),  // skill 正文序列化为文档数组字符串 → content.prompt
             "",
             "session-openclaw",
             "input",
