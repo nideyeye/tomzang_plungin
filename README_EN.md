@@ -5,7 +5,7 @@ An OpenClaw security content detection plugin that performs real-time safety che
 ## Key Features
 
 - **Real-time Content Detection**: Intercepts all LLM requests, extracts user input, and sends it to a firewall API for security scanning
-- **Tool Call Auditing**: Scans tool names and parameters before tool execution via the `before_tool_call` hook
+- **Tool Call Auditing**: Scans tool names and parameters before tool execution via the `before_tool_call` hook; after execution (`after_tool_call`), submits the call command and execution result to the firewall for record-keeping (fail-open, alert-only, does not interfere with results)
 - **Smart Blocking**: When sensitive content is detected, automatically constructs a compliant blocking response (supports both SSE streaming and non-streaming) to prevent the request from reaching the LLM
 - **Built-in Command Bypass**: Automatically skips built-in commands starting with `/` and system-internal operations (e.g., `/reset`, summary generation) to avoid false positives
 - **Hit Rule Display**: When blocking, displays matched security rules in a Markdown table format (rule_code, rule_name, description)
@@ -20,6 +20,9 @@ User Input → Fetch Interception → Extract User Prompt → Firewall API Check
 Tool Call → before_tool_call → Firewall API Check
   ├─ Safe → Execute tool normally
   └─ Unsafe → Return block interception
+
+Tool Result → after_tool_call → Firewall API submission (source=tool_result)
+  └─ Risk detected → Log alert only, does not interfere with the produced result
 ```
 
 ## Configuration

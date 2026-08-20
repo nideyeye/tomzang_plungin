@@ -5,7 +5,7 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 ## 主要功能
 
 - **实时内容检测**：拦截所有 LLM 请求，提取用户输入内容，调用防火墙 API 进行安全检测
-- **工具调用审计**：在工具调用执行前（`before_tool_call`）对工具名称和参数进行安全检测
+- **工具调用审计**：在工具调用执行前（`before_tool_call`）对工具名称和参数进行安全检测；执行后（`after_tool_call`）将调用命令与执行结果送审留存（fail-open，仅告警记录，不干预结果）
 - **智能拦截**：检测到敏感内容时，自动构造合规的拦截响应（支持 SSE 流式和非流式），阻止请求到达 LLM
 - **内置命令跳过**：自动跳过以 `/` 开头的内置命令和系统内部操作（如 `/reset`、摘要生成等），避免误检
 - **命中规则展示**：拦截时以 Markdown 表格形式展示命中的安全规则（rule_code、rule_name、description）
@@ -20,6 +20,9 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 工具调用 → before_tool_call → 防火墙 API 检测
   ├─ 安全 → 正常执行工具
   └─ 不安全 → 返回 block 拦截
+
+工具结果 → after_tool_call → 防火墙 API 送审（source=tool_result）
+  └─ 命中风险 → 仅记录告警日志，不干预已产生的结果
 ```
 
 ## 架构与实现
@@ -551,7 +554,7 @@ var timeoutId = setTimeout(function () {
   "session_id": "会话标识",
   "trace_id": "追踪ID",
   "stage": "input",
-  "source": "user_prompt",
+  "source": "text",
   "content_type": "text",
   "content": {
     "prompt": "待检测的用户输入内容",
@@ -569,10 +572,10 @@ var timeoutId = setTimeout(function () {
 | `session_id` | string | 会话标识符 | `"session-openclaw"` |
 | `trace_id` | string | 追踪 ID，格式为 `trace-{timestamp}-{callId}` | `"trace-1234567890-1"` |
 | `stage` | string | 检测阶段：`input`（输入）、`output`（输出） | `"input"` |
-| `source` | string | 内容来源：`user_prompt`（用户输入）、`tool_call`（工具调用） | `"user_prompt"` |
+| `source` | string | 内容来源：`text`（用户输入 / LLM 输出文本）、`tool_call`（工具调用）、`tool_result`（工具调用结果）、`skill`（Skill 调用） | `"text"` |
 | `content_type` | string | 内容类型，目前固定为 `"text"` | `"text"` |
-| `content.prompt` | string | 输入阶段：用户提示词；输出阶段：空字符串 | 用户输入内容 |
-| `content.response` | string | 输入阶段：空字符串；输出阶段：LLM 响应内容 | LLM 输出内容 |
+| `content.prompt` | string | 输入侧内容：用户提示词、工具调用命令（纯 params JSON）、skill 正文 | 用户输入内容 |
+| `content.response` | string | 输出侧内容：LLM 响应内容、工具执行结果 | LLM 输出内容 |
 | `content.image` | string | 图像内容（预留，当前为空） | `""` |
 
 ### 响应格式
