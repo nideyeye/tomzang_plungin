@@ -1,11 +1,16 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-08-19";
+var PLUGIN_VERSION = "v2026-08-20";
 var fs = require("fs");
 var os = require("os");
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
 var DEFAULT_TIMEOUT_MS = 3000;  // 默认防火墙 API 超时时间 3 秒
 var FIREWALL_API_PATH = "/api/firewall/openclaw/validate";
+// 工具白名单：默认放行浏览器搜索和飞书 cli（before/after 两个钩子共用）
+var TOOL_WHITELIST = ["web_search", "lark-cli"];
+// before → after 传递工具调用命令：after_tool_call 的 ctx 无调用参数，需在 before 阶段捕获
+var PENDING_TOOL_CALL_PARAMS_MAX = 200;
+var pendingToolCallParams = new Map();
 
 function buildFullFirewallUrl(host) {
   if (!host) return "";
@@ -104,7 +109,7 @@ async function callFirewallApi(fetchFn, config, prompt, response, sessionId, sta
     session_id: sessionId || "session-openclaw",
     trace_id: traceId,
     stage: stage || "input",
-    source: source || "user_prompt",
+    source: source || "text",
     source_user: (function () {
       var v = process.env.GROUP_CHAT_ALLOWED_SENDERS;
       return (typeof v === "string" || typeof v === "number") ? String(v) : "";
@@ -581,6 +586,40 @@ function extractSkillFilePath(event) {
   return null;
 }
 
+// ─── 工具调用参数传递（before → after）───
+// after_tool_call 的 ctx 无调用参数，先在 before_tool_call 按 toolCallId 记录，
+// after 阶段取出消费；被阻断未执行的调用残留条目由容量上限自然淘汰
+
+function toolCallParamsKey(ctx) {
+  if (ctx.toolCallId) return String(ctx.toolCallId);
+  return "fallback:" + ctx.toolName;  // toolCallId 缺失时按工具名兜底（并行同名调用可能串扰，可接受）
+}
+
+function recordToolCallParams(ctx, params) {
+  if (pendingToolCallParams.size >= PENDING_TOOL_CALL_PARAMS_MAX) {
+    pendingToolCallParams.delete(pendingToolCallParams.keys().next().value);  // 淘汰最旧条目
+  }
+  pendingToolCallParams.set(toolCallParamsKey(ctx), params);
+}
+
+function takeToolCallParams(ctx) {
+  var key = toolCallParamsKey(ctx);
+  var params = pendingToolCallParams.get(key);
+  pendingToolCallParams.delete(key);
+  return params;
+}
+
+function stringifyToolCallParams(params) {
+  if (params === undefined || params === null) return "";
+  if (typeof params === "string") return params;
+  try {
+    return JSON.stringify(params) || "";
+  } catch (e) {
+    logWarn("tool", "params_stringify_failed", { error: String(e && e.message || e) });
+    return "";
+  }
+}
+
 // ─── Fetch 工具函数 ───
 
 function getUrlFromFetchArgs(input) {
@@ -972,7 +1011,7 @@ async function auditNonStreamingResponse(originalFetch, config, resp, userPrompt
   });
 
   var fwResult = await callFirewallApi(
-    originalFetch, config, userPrompt, assistantText, sessionId, "output"
+    originalFetch, config, userPrompt, assistantText, sessionId, "output", "text"
   );
 
   // 情况1：完全拦截
@@ -1084,7 +1123,7 @@ async function auditStreamingResponse(originalFetch, config, resp, userPrompt, s
   });
 
   var fwResult = await callFirewallApi(
-    originalFetch, config, userPrompt, assistantText, sessionId, "output"
+    originalFetch, config, userPrompt, assistantText, sessionId, "output", "text"
   );
 
   // 情况1：完全拦截
@@ -1374,11 +1413,13 @@ var plugin = {
 
       // 工具调用防火墙检查（默认启用）
       // 默认放行浏览器搜索和飞书 cli
-      const allowedTools = ["web_search", "lark-cli"];
-      if (allowedTools.includes(event.toolName)) {
+      if (TOOL_WHITELIST.includes(event.toolName)) {
         logDebug("tool", "approval_skipped_whitelist", { toolName: ctx.toolName });
         return;
       }
+
+      // 记录调用命令，供 after_tool_call 结果审计（source=tool_result）使用
+      recordToolCallParams(ctx, event.params);
 
       // ─── skill 正文审计（互斥：命中 skill 则不走 tool_call 审计）───
       // skill 正文不经 HTTP 流转（纯本地 fs 读取），只能在此时主动读取文件后送审
@@ -1449,10 +1490,7 @@ var plugin = {
       }
 
       // 通过防火墙 API 判断工具调用是否需要拦截
-      var paramsText = "";
-      if (event.params) {
-        paramsText = typeof event.params === "string" ? event.params : JSON.stringify(event.params);
-      }
+      var paramsText = stringifyToolCallParams(event.params);
 
       logDebug("tool", "firewall_tool_guard_check", {
         toolName: ctx.toolName,
@@ -1549,6 +1587,76 @@ var plugin = {
         error: ctx.error,
         durationMs: ctx.durationMs
       });
+
+      // ─── tool 结果审计（fail-open：仅告警，不干预已产生的结果）───
+      // 白名单与 before_tool_call 保持一致
+      if (TOOL_WHITELIST.includes(ctx.toolName)) {
+        logDebug("tool", "result_audit_skipped_whitelist", { toolName: ctx.toolName });
+        return;
+      }
+
+      // 调用命令：before 阶段捕获的 params（纯 params JSON，与 tool_call 送审格式一致）
+      var commandText = stringifyToolCallParams(takeToolCallParams(ctx));
+
+      // 执行结果：result 字符串直用 / 对象序列化 / 仅有 error 时用错误字符串
+      var resultText = "";
+      if (ctx.result) {
+        resultText = typeof ctx.result === "string" ? ctx.result : stringifyToolCallParams(ctx.result);
+      } else if (ctx.error) {
+        resultText = String(ctx.error);
+      }
+
+      if (!commandText && !resultText) {
+        logDebug("tool", "firewall_tool_result_skipped_empty", {
+          toolName: ctx.toolName,
+          toolCallId: ctx.toolCallId
+        });
+        return;
+      }
+
+      logDebug("tool", "firewall_tool_result_check", {
+        toolName: ctx.toolName,
+        toolCallId: ctx.toolCallId,
+        commandPreview: commandText ? commandText.slice(0, 500) : "",
+        resultPreview: resultText ? resultText.slice(0, 500) : ""
+      });
+
+      try {
+        var fwResult = await callFirewallApi(
+          globalOriginalFetch,
+          globalConfig,
+          commandText,                                  // 工具调用命令 → content.prompt
+          resultText,                                   // 执行结果 → content.response
+          ctx.sessionId || "session-openclaw",
+          "output",
+          "tool_result"                                 // source 字段
+        );
+
+        logDebug("tool", "firewall_tool_result_check_result", {
+          toolName: ctx.toolName,
+          toolCallId: ctx.toolCallId,
+          action: fwResult.action,
+          riskLevel: fwResult.riskLevel,
+          violationReason: fwResult.violationReason
+        });
+
+        // 结果已产生，无法真正拦截：仅记录告警，由防火墙侧留存审计记录
+        if (fwResult.action === "block") {
+          logWarn("tool", "tool_result_blocked_alert", {
+            toolName: ctx.toolName,
+            toolCallId: ctx.toolCallId,
+            action: fwResult.action,
+            violationReason: fwResult.violationReason,
+            riskLevel: fwResult.riskLevel
+          });
+        }
+      } catch (e) {
+        logWarn("tool", "firewall_tool_result_error", {
+          toolName: ctx.toolName,
+          toolCallId: ctx.toolCallId,
+          error: String(e && e.message || e)
+        });
+      }
     });
 
     logDebug("init", "hooks_registered", {});
@@ -1656,7 +1764,7 @@ function installGlobalFetchInterceptor() {
     if (userPrompt && !shouldSkipFirewall(userPrompt)) {
       console.log("[tomzang_plungin] [llm] [firewall_check_start] callId=" + callId);
       try {
-        var fwResult = await callFirewallApi(globalOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input");
+        var fwResult = await callFirewallApi(globalOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input", "text");
         console.log("[tomzang_plungin] [llm] [firewall_check_result] callId=" + callId + " action=" + fwResult.action + " result=" + fwResult.result);
         if (fwResult.result === "block") {
           var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
@@ -1910,7 +2018,7 @@ function tryInstallUndiciInterceptor(undiciPath) {
         if (userPrompt && !shouldSkipFirewall(userPrompt)) {
           console.log("[tomzang_plungin] [undici] [firewall_check_start] callId=" + callId);
           try {
-            var fwResult = await callFirewallApi(undiciOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input");
+            var fwResult = await callFirewallApi(undiciOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input", "text");
             console.log("[tomzang_plungin] [undici] [firewall_check_result] callId=" + callId + " action=" + fwResult.action + " result=" + fwResult.result);
             if (fwResult.result === "block") {
               var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
