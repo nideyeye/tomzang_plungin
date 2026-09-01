@@ -34,7 +34,7 @@ Configure in `~/.openclaw/openclaw.json` under `plugins.entries.tomzang_plungin.
   "firewallUrl": "http://your-firewall-host:port/api/firewall/openclaw/validate",
   "authKey": "your-auth-key",
   "blockMessage": "Custom block message",
-  "debug": false
+  "debug": "false"
 }
 ```
 
@@ -45,7 +45,7 @@ Configure in `~/.openclaw/openclaw.json` under `plugins.entries.tomzang_plungin.
 | `firewallUrl` | string | **Yes** | None | Firewall API URL for content security scanning |
 | `authKey` | string | **Yes** | None | Authentication key for the firewall API |
 | `blockMessage` | string | No | `当前请求包含敏感关键字，已被安全组件拦截` | Custom block message (displayed when no hit rules are matched) |
-| `debug` | boolean | No | `false` | Enable debug mode for detailed logging output |
+| `debug` | string / boolean | No | `false` | Enable debug mode for detailed logging output. Accepts boolean or `"true"`/`"false"` string |
 
 > **Important**: `firewallUrl` and `authKey` are required. If not configured, the plugin will report an error on startup and skip all firewall detection features (only basic lifecycle hook logging will remain active).
 

@@ -32,8 +32,8 @@
         "description": "Custom block message displayed when input is intercepted (default: 当前请求包含敏感关键字，已被安全组件拦截)"
       },
       "debug": {
-        "type": "string",
-        "description": "Enable debug mode for detailed logging (default: true)"
+        "type": ["string", "boolean"],
+        "description": "Enable debug mode for detailed logging (default: false, accepts boolean or \"true\"/\"false\")"
       },
       "timeout": {
         "type": "number",

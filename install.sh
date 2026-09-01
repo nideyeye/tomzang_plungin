@@ -317,7 +317,7 @@ write_config_file() {
       if (process.env.BLOCK_MESSAGE && process.env.BLOCK_MESSAGE.length > 0) {
         entry.config.blockMessage = process.env.BLOCK_MESSAGE;
       }
-      entry.config.debug = process.env.DEBUG_VAL === "true";
+      entry.config.debug = process.env.DEBUG_VAL;
       cfg.plugins.entries[pid] = entry;
 
       // 2. 写入 allowlist (plugins.allow), 这是消除 "not in allowlist" 警告的关键
@@ -352,7 +352,7 @@ write_config_file() {
         "config": {
           "firewallUrl": "${FIREWALL_URL}",
           "authKey": "${AUTH_KEY}"$( [[ -n "${BLOCK_MESSAGE}" ]] && printf ',\n          "blockMessage": "%s"' "${BLOCK_MESSAGE}" ),
-          "debug": ${DEBUG_VAL}
+          "debug": "${DEBUG_VAL}"
         }
       }
     }

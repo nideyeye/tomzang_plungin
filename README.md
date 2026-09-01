@@ -525,7 +525,7 @@ var timeoutId = setTimeout(function () {
   "firewallUrl": "http://your-firewall-host:port/api/firewall/openclaw/validate",
   "authKey": "your-auth-key",
   "blockMessage": "自定义拦截提示语",
-  "debug": false,
+  "debug": "false",
   "timeout": 3000,
   "undiciPath": "/path/to/undici"
 }
@@ -538,7 +538,7 @@ var timeoutId = setTimeout(function () {
 | `firewallUrl` | string | **是** | 无 | 防火墙 API 地址，用于内容安全检测 |
 | `authKey` | string | **是** | 无 | 防火墙 API 认证密钥 |
 | `blockMessage` | string | 否 | `当前请求包含敏感关键字，已被安全组件拦截` | 自定义拦截提示语（当无命中规则时显示） |
-| `debug` | string | 否 | `false` | 是否启用调试模式，开启后会输出详细日志。支持 `true`/`false` |
+| `debug` | string / boolean | 否 | `false` | 是否启用调试模式，开启后会输出详细日志。支持布尔值或 `"true"`/`"false"` 字符串 |
 | `timeout` | number | 否 | `3000` | 防火墙 API 超时时间（毫秒） |
 | `undiciPath` | string | 否 | 自动检测 | 自定义 undici 模块路径，用于拦截请求（未指定时自动检测） |
 
@@ -617,7 +617,7 @@ var timeoutId = setTimeout(function () {
 仓库根目录提供了 `install.sh`，会自动下载并部署插件，写入 `~/.openclaw/openclaw.json` 中的 `plugins.entries.tomzang_plungin.config`。
 
 ```bash
-./install.sh <firewallUrl> <authKey> [blockMessage] [debug] [timeout] [undiciPath]
+./install.sh <firewallUrl> <authKey> [blockMessage] [debug]
 ```
 
 参数说明：
@@ -628,8 +628,6 @@ var timeoutId = setTimeout(function () {
 | `authKey` | 是 | `authKey` | 防火墙 API 认证密钥 |
 | `blockMessage` | 否 | `blockMessage` | 自定义拦截提示语 |
 | `debug` | 否 | `debug` | 是否开启调试日志，`true`/`false` |
-| `timeout` | 否 | `timeout` | 防火墙 API 超时时间（毫秒），默认 3000 |
-| `undiciPath` | 否 | `undiciPath` | 自定义 undici 模块路径，未指定时自动检测 |
 
 示例：
 
