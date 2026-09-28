@@ -25,13 +25,14 @@ trap cleanup EXIT
 
 usage() {
   cat <<EOF
-用法: $0 <firewallUrl> <authKey> [blockMessage] [debug]
+用法: $0 <firewallUrl> <authKey> [blockMessage] [debug] [blockTip]
 
 参数:
   firewallUrl   防火墙 API 地址 (必填, 对应 openclaw.plugin.json 中的 firewallUrl)
   authKey       防火墙 API 认证密钥 (必填, 对应 openclaw.plugin.json 中的 authKey)
-  blockMessage  自定义拦截提示语 (可选)
+  blockMessage  自定义拦截提示语 (可选, 预留字段)
   debug         是否开启调试日志 true/false (可选, 默认 false)
+  blockTip      拦截时展示给用户的统一提示文案 (可选, 默认使用插件内置文案)
 
 示例:
   $0 http://127.0.0.1:8080/api/firewall/openclaw/validate my-auth-key
@@ -48,6 +49,7 @@ FIREWALL_URL="$1"
 AUTH_KEY="$2"
 BLOCK_MESSAGE="${3:-}"
 DEBUG_FLAG="${4:-false}"
+BLOCK_TIP="${5:-}"
 
 # 归一化 debug 取值
 if [[ "${DEBUG_FLAG}" == "true" ]]; then
@@ -99,6 +101,10 @@ config_via_openclaw() {
   fi
   if [[ "${ok}" -eq 1 && -n "${BLOCK_MESSAGE}" ]] && \
      ! openclaw plugins config "${PLUGIN_ID}" "blockMessage=${BLOCK_MESSAGE}" >/dev/null 2>&1; then
+    ok=0
+  fi
+  if [[ "${ok}" -eq 1 && -n "${BLOCK_TIP}" ]] && \
+     ! openclaw plugins config "${PLUGIN_ID}" "blockTip=${BLOCK_TIP}" >/dev/null 2>&1; then
     ok=0
   fi
   if [[ "${ok}" -eq 1 ]] && \
@@ -288,6 +294,7 @@ write_config_file() {
     FIREWALL_URL="${FIREWALL_URL}" \
     AUTH_KEY="${AUTH_KEY}" \
     BLOCK_MESSAGE="${BLOCK_MESSAGE}" \
+    BLOCK_TIP="${BLOCK_TIP}" \
     DEBUG_VAL="${DEBUG_VAL}" \
     PLUGIN_ID="${PLUGIN_ID}" \
     PLUGIN_DIR="${PLUGIN_DIR}" \
@@ -316,6 +323,9 @@ write_config_file() {
       entry.config.authKey = process.env.AUTH_KEY;
       if (process.env.BLOCK_MESSAGE && process.env.BLOCK_MESSAGE.length > 0) {
         entry.config.blockMessage = process.env.BLOCK_MESSAGE;
+      }
+      if (process.env.BLOCK_TIP && process.env.BLOCK_TIP.length > 0) {
+        entry.config.blockTip = process.env.BLOCK_TIP;
       }
       entry.config.debug = process.env.DEBUG_VAL;
       cfg.plugins.entries[pid] = entry;
@@ -351,7 +361,7 @@ write_config_file() {
         "enabled": true,
         "config": {
           "firewallUrl": "${FIREWALL_URL}",
-          "authKey": "${AUTH_KEY}"$( [[ -n "${BLOCK_MESSAGE}" ]] && printf ',\n          "blockMessage": "%s"' "${BLOCK_MESSAGE}" ),
+          "authKey": "${AUTH_KEY}"$( [[ -n "${BLOCK_MESSAGE}" ]] && printf ',\n          "blockMessage": "%s"' "${BLOCK_MESSAGE}" )$( [[ -n "${BLOCK_TIP}" ]] && printf ',\n          "blockTip": "%s"' "${BLOCK_TIP}" ),
           "debug": "${DEBUG_VAL}"
         }
       }

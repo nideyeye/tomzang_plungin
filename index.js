@@ -1,9 +1,11 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-09-01";
+var PLUGIN_VERSION = "v2026-09-28";
 var fs = require("fs");
 var os = require("os");
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
+// 所有拦截场景统一展示给用户的提示语（blockTip 未配置时的兜底文案）
+var DEFAULT_BLOCK_TIP = "抱歉，我无法执行该请求。作为智能助手，我会在我的设定范围内提供帮助。如果你有合法的需求，请正常描述，我会尽力协助。";
 var DEFAULT_TIMEOUT_MS = 3000;  // 默认防火墙 API 超时时间 3 秒
 var FIREWALL_API_PATH = "/api/firewall/openclaw/validate";
 // 工具白名单：默认放行浏览器搜索和飞书 cli（before/after 两个钩子共用）
@@ -41,6 +43,9 @@ function resolveConfig(rawConfig) {
     blockMessage: typeof cfg.blockMessage === "string" && cfg.blockMessage.trim() !== ""
       ? cfg.blockMessage.trim()
       : DEFAULT_BLOCK_MESSAGE,
+    blockTip: typeof cfg.blockTip === "string" && cfg.blockTip.trim() !== ""
+      ? cfg.blockTip.trim()
+      : DEFAULT_BLOCK_TIP,
     debug: debug,
     timeout: timeout,
     undiciPath: typeof cfg.undiciPath === "string" && cfg.undiciPath.trim() !== ""
@@ -675,37 +680,13 @@ function headersToRecord(headers) {
 
 // ─── 拦截提示语生成 ───
 
-// 从防火墙返回的 hit_rules 中提取详细信息，生成 markdown 表格
-function buildBlockMessageFromHitRules(hitRules) {
-  if (!Array.isArray(hitRules) || hitRules.length === 0) {
-    return DEFAULT_BLOCK_MESSAGE;
+// 所有拦截场景统一展示的提示语：优先用配置的 blockTip，未配置时用内置默认文案
+function resolveBlockTip(config) {
+  var tip = (config && typeof config === "object" ? config : globalConfig).blockTip;
+  if (typeof tip === "string" && tip.trim() !== "") {
+    return tip;
   }
-  var lines = [
-    "**⛔ 当前请求已被安全组件拦截，命中以下规则：**",
-    "",
-    "| 规则代码 | 规则名称 | 风险等级 | 描述 | AIA分类 |",
-    "| --- | --- | ---: | --- | --- |"
-  ];
-  for (var i = 0; i < hitRules.length; i++) {
-    var rule = hitRules[i];
-    var code = rule.rule_code || "-";
-    var name = rule.rule_name || "-";
-    var riskLevel = rule.risk_level !== undefined ? rule.risk_level : "-";
-    var desc = rule.description || "-";
-    var aiaName = rule.aia_name || "-";
-
-    // 风险等级显示为 emoji
-    var riskEmoji = "";
-    if (riskLevel >= 3) riskEmoji = "🔴";
-    else if (riskLevel === 2) riskEmoji = "🟠";
-    else if (riskLevel === 1) riskEmoji = "🟡";
-    else riskEmoji = "⚪";
-
-    lines.push("| " + code + " | " + name + " | " + riskEmoji + " " + riskLevel + " | " + desc + " | " + aiaName + " |");
-  }
-  lines.push("");
-  lines.push("**如需继续操作，请联系管理员或调整请求内容。**");
-  return lines.join("\n");
+  return DEFAULT_BLOCK_TIP;
 }
 
 // ─── 响应构造 ───
@@ -1016,7 +997,7 @@ async function auditNonStreamingResponse(originalFetch, config, resp, userPrompt
 
   // 情况1：完全拦截
   if (fwResult.result === "block") {
-    var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+    var blockMsg = resolveBlockTip(config);
     logInfo("llm", "output_blocked", {
       callId: callId,
       url: url,
@@ -1128,7 +1109,7 @@ async function auditStreamingResponse(originalFetch, config, resp, userPrompt, s
 
   // 情况1：完全拦截
   if (fwResult.result === "block") {
-    var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+    var blockMsg = resolveBlockTip(config);
     logInfo("llm", "output_blocked", {
       callId: callId,
       url: url,
@@ -1323,6 +1304,7 @@ var plugin = {
       firewallUrl: { type: "string", description: "Firewall API host and port, e.g. http://localhost:8080 (required, path /api/firewall/openclaw/validate will be appended automatically)" },
       authKey: { type: "string", description: "Authentication key for the firewall API (required)" },
       blockMessage: { type: "string", default: DEFAULT_BLOCK_MESSAGE, description: "Custom block message" },
+      blockTip: { type: "string", default: DEFAULT_BLOCK_TIP, description: "Unified tip shown to the user when content is blocked (input, output, tool call, skill)" },
       debug: { type: "boolean", default: false, description: "Enable debug mode (disabled by default)" },
       timeout: { type: "number", default: DEFAULT_TIMEOUT_MS, description: "Firewall API timeout in milliseconds (default: 3000)" },
       undiciPath: { type: "string", description: "Custom path to undici module (optional, auto-detected if not specified)" }
@@ -1450,7 +1432,7 @@ var plugin = {
           });
           // 返回值处理逻辑与下方 tool_call 完全一致
           if (skillFwResult.action === "block") {
-            var skillBlockMsg = buildBlockMessageFromHitRules(skillFwResult.hitRules);
+            var skillBlockMsg = resolveBlockTip(globalConfig);
             logInfo("skill", "skill_blocked", {
               filePath: skillFilePath,
               action: skillFwResult.action,
@@ -1518,7 +1500,7 @@ var plugin = {
 
       // 根据 action 判断：block 直接终止，pass 直接放行，其他需要二次确认
       if (fwCheckResult.action === "block") {
-        var blockMsg = buildBlockMessageFromHitRules(fwCheckResult.hitRules);
+        var blockMsg = resolveBlockTip(globalConfig);
         logInfo("tool", "call_blocked", {
           toolName: ctx.toolName,
           action: fwCheckResult.action,
@@ -1670,6 +1652,7 @@ var globalConfig = {
   firewallUrl: "",
   authKey: "",
   blockMessage: DEFAULT_BLOCK_MESSAGE,
+  blockTip: DEFAULT_BLOCK_TIP,
   debug: false,  // 默认关闭 debug
   timeout: DEFAULT_TIMEOUT_MS,  // 默认 3 秒超时
   undiciPath: ""
@@ -1769,7 +1752,7 @@ function installGlobalFetchInterceptor() {
         if (fwResult.result === "block") {
           var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
           console.log("[tomzang_plungin] [llm] [request_blocked] callId=" + callId);
-          var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+          var blockMsg = resolveBlockTip(globalConfig);
           return makeBlockedResponseForRequest(wantsSse, blockMsg);
         }
       } catch (e) {
@@ -2023,7 +2006,7 @@ function tryInstallUndiciInterceptor(undiciPath) {
             if (fwResult.result === "block") {
               var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
               console.log("[tomzang_plungin] [undici] [blocked] callId=" + callId);
-              var blockMsg = buildBlockMessageFromHitRules(fwResult.hitRules);
+              var blockMsg = resolveBlockTip(globalConfig);
               return makeBlockedResponseForRequest(wantsSse, blockMsg);
             }
           } catch (e) {

@@ -31,6 +31,10 @@
         "type": "string",
         "description": "Custom block message displayed when input is intercepted (default: 当前请求包含敏感关键字，已被安全组件拦截)"
       },
+      "blockTip": {
+        "type": "string",
+        "description": "Unified tip shown to the user when any content is blocked, including user input, model output, tool calls and skills (default: 抱歉，我无法执行该请求。作为智能助手，我会在我的设定范围内提供帮助。如果你有合法的需求，请正常描述，我会尽力协助。)"
+      },
       "debug": {
         "type": ["string", "boolean"],
         "description": "Enable debug mode for detailed logging (default: false, accepts boolean or \"true\"/\"false\")"
