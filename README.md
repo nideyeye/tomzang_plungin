@@ -8,7 +8,7 @@ OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实
 - **工具调用审计**：在工具调用执行前（`before_tool_call`）对工具名称和参数进行安全检测；执行后（`after_tool_call`）将调用命令与执行结果送审留存（fail-open，仅告警记录，不干预结果）
 - **智能拦截**：检测到敏感内容时，自动构造合规的拦截响应（支持 SSE 流式和非流式），阻止请求到达 LLM
 - **内置命令跳过**：自动跳过以 `/` 开头的内置命令和系统内部操作（如 `/reset`、摘要生成等），避免误检
-- **命中规则展示**：拦截时以 Markdown 表格形式展示命中的安全规则（rule_code、rule_name、description）
+- **统一拦截提示**：所有拦截场景（用户输入、模型返回、工具调用、Skill）统一展示可配置的提示文案（`blockTip`，未配置时使用内置默认文案）；命中的安全规则详情仅记录在日志中
 
 ## 工作原理
 
@@ -84,6 +84,7 @@ graph TD
 1. **保存原始引用**：将原始 `globalThis.fetch` 保存到 `globalOriginalFetch` 变量
 2. **包装 fetch 函数**：创建 `wrappedFetch` 函数，在调用原始 fetch 前后插入拦截逻辑
 3. **双重拦截**：同时拦截 `globalThis.fetch` 和 `undici.fetch`（OpenClaw 使用的 HTTP 客户端）
+4. **model fetch 运行时注入（openclaw 2026.9+ 适配）**：新版 openclaw 改为 ESM 打包，LLM 请求经 `loadUndiciModule()` 取运行时 fetch，不再经过 `globalThis.fetch` 与 `undici.fetch` 属性（CJS 属性替换够不到 ESM namespace）。插件通过 openclaw 内置的全局注入点 `globalThis.__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__` 把包装版 fetch 注入 model fetch 通道；该注入点仅对含 `fetch` 字段的依赖组合生效，openclaw 自身的 dispatcher/Agent 逻辑不受影响。2026.7.x 旧版同样支持该注入点，行为完全兼容。
 
 ```mermaid
 sequenceDiagram
@@ -405,6 +406,7 @@ var globalConfig = {                  // 全局配置
   firewallUrl: "",
   authKey: "",
   blockMessage: DEFAULT_BLOCK_MESSAGE,
+  blockTip: DEFAULT_BLOCK_TIP,
   debug: false,
   timeout: DEFAULT_TIMEOUT_MS
 };
@@ -525,6 +527,7 @@ var timeoutId = setTimeout(function () {
   "firewallUrl": "http://your-firewall-host:port/api/firewall/openclaw/validate",
   "authKey": "your-auth-key",
   "blockMessage": "自定义拦截提示语",
+  "blockTip": "自定义统一拦截提示文案",
   "debug": "false",
   "timeout": 3000,
   "undiciPath": "/path/to/undici"
@@ -537,7 +540,8 @@ var timeoutId = setTimeout(function () {
 |--------|------|------|--------|------|
 | `firewallUrl` | string | **是** | 无 | 防火墙 API 地址，用于内容安全检测 |
 | `authKey` | string | **是** | 无 | 防火墙 API 认证密钥 |
-| `blockMessage` | string | 否 | `当前请求包含敏感关键字，已被安全组件拦截` | 自定义拦截提示语（当无命中规则时显示） |
+| `blockMessage` | string | 否 | `当前请求包含敏感关键字，已被安全组件拦截` | 自定义拦截提示语（预留字段，当前未生效） |
+| `blockTip` | string | 否 | 内置默认文案 | 所有拦截场景（用户输入、模型返回、工具调用、Skill）统一展示给用户的提示文案；未配置时使用内置默认文案「抱歉，我无法执行该请求。作为智能助手，我会在我的设定范围内提供帮助。如果你有合法的需求，请正常描述，我会尽力协助。」 |
 | `debug` | string / boolean | 否 | `false` | 是否启用调试模式，开启后会输出详细日志。支持布尔值或 `"true"`/`"false"` 字符串 |
 | `timeout` | number | 否 | `3000` | 防火墙 API 超时时间（毫秒） |
 | `undiciPath` | string | 否 | 自动检测 | 自定义 undici 模块路径，用于拦截请求（未指定时自动检测） |
@@ -617,7 +621,7 @@ var timeoutId = setTimeout(function () {
 仓库根目录提供了 `install.sh`，会自动下载并部署插件，写入 `~/.openclaw/openclaw.json` 中的 `plugins.entries.tomzang_plungin.config`。
 
 ```bash
-./install.sh <firewallUrl> <authKey> [blockMessage] [debug]
+./install.sh <firewallUrl> <authKey> [blockMessage] [debug] [blockTip]
 ```
 
 参数说明：
@@ -626,8 +630,9 @@ var timeoutId = setTimeout(function () {
 |----------|------|------------|------|
 | `firewallUrl` | 是 | `firewallUrl` | 防火墙 API 地址 |
 | `authKey` | 是 | `authKey` | 防火墙 API 认证密钥 |
-| `blockMessage` | 否 | `blockMessage` | 自定义拦截提示语 |
+| `blockMessage` | 否 | `blockMessage` | 自定义拦截提示语（预留字段，当前未生效） |
 | `debug` | 否 | `debug` | 是否开启调试日志，`true`/`false` |
+| `blockTip` | 否 | `blockTip` | 拦截时展示给用户的统一提示文案，未提供时使用插件内置文案 |
 
 示例：
 
@@ -658,10 +663,19 @@ var timeoutId = setTimeout(function () {
 5. 进入插件目录，执行离线安装命令 `openclaw plugins install -l .`
 6. 重启 gateway 应用 `openclaw gateway restart`
 7. 开启 debug 模式 `openclaw config set plugins.entries.tomzang_plungin.config.debug true`
+8. （openclaw 2026.9+ 必需）授权会话访问 hook：`openclaw config set plugins.entries.tomzang_plungin.hooks.allowConversationAccess true`。新版 openclaw 对非内置插件默认禁用 `before_prompt_build` 等会话 hook，未设置该字段时仅影响生命周期日志，不影响 LLM 审计与工具守卫；使用 `install.sh` 安装时会自动写入。
 
 ## 故障排查
 
 ### 常见问题
+
+#### 0. 升级到 openclaw 2026.9+ 后插件失效
+
+**症状**：openclaw 升级到 2026.9.x 后，LLM 请求不再被审计（日志中无 `[llm]` / `[undici]` 请求日志），但插件显示已加载、`Fetch interceptor status: ACTIVE`。
+
+**原因**：2026.9 起 openclaw 改为 ESM 打包，LLM 请求经由 `loadUndiciModule()` 运行时依赖发起，`globalThis.fetch` 与 `undici.fetch` 的属性替换均不再被命中；同时请求体从 string 变为 Uint8Array。
+
+**解决方案**：升级本插件到 v2026-10-02 及以上版本（通过 model fetch 运行时注入点 `__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__` 接管请求通道，并兼容 Uint8Array 请求体）。
 
 #### 1. 插件未生效
 
