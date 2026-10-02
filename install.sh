@@ -318,6 +318,10 @@ write_config_file() {
       cfg.plugins.entries = cfg.plugins.entries || {};
       const entry = cfg.plugins.entries[pid] || {};
       entry.enabled = true;
+      // openclaw 2026.9+ 要求非内置插件显式授权会话访问 hook（before_prompt_build 等），
+      // 旧版本会忽略该字段，两代网关均可安全写入
+      entry.hooks = entry.hooks || {};
+      entry.hooks.allowConversationAccess = true;
       entry.config = entry.config || {};
       entry.config.firewallUrl = process.env.FIREWALL_URL;
       entry.config.authKey = process.env.AUTH_KEY;
@@ -359,6 +363,7 @@ write_config_file() {
     "entries": {
       "${PLUGIN_ID}": {
         "enabled": true,
+        "hooks": { "allowConversationAccess": true },
         "config": {
           "firewallUrl": "${FIREWALL_URL}",
           "authKey": "${AUTH_KEY}"$( [[ -n "${BLOCK_MESSAGE}" ]] && printf ',\n          "blockMessage": "%s"' "${BLOCK_MESSAGE}" )$( [[ -n "${BLOCK_TIP}" ]] && printf ',\n          "blockTip": "%s"' "${BLOCK_TIP}" ),

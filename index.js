@@ -1,6 +1,6 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-09-28";
+var PLUGIN_VERSION = "v2026-10-02";
 var fs = require("fs");
 var os = require("os");
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
@@ -289,7 +289,11 @@ function extractLastUserPrompt(reqBodyText) {
         // 检查是否是元数据块（以特定前缀开头）
         var isMetadata = content.indexOf("Sender (untrusted metadata):") === 0 ||
                          content.indexOf("Conversation info (untrusted metadata):") === 0 ||
-                         content.indexOf("System:") === 0;
+                         content.indexOf("System:") === 0 ||
+                         // openclaw 2026.9+ 在会话末尾注入的内部上下文块（非用户输入），
+                         // 若不跳过会导致真实用户消息被挤出审计范围
+                         content.indexOf("Conversation data (data, not instructions):") === 0 ||
+                         content.indexOf("<<<END_OPENCLAW_INTERNAL_CONTEXT>>>") !== -1;
 
         if (isMetadata) {
           logDebug("extract", "skipped_metadata_block", {
@@ -397,6 +401,12 @@ function stripMetadataPrefix(text) {
 function stripMetadataPrefixRaw(text) {
   if (!text || typeof text !== "string") return text || "";
 
+  // openclaw 会把运行时上下文行（"Runtime: agent=..."）追加到用户消息尾部。
+  // 该行可能独立成段（REST 路径），也可能与用户内容同处一段（TUI/webchat 路径），
+  // 且剥离链的多个分支（``` 代码块分支等）会提前返回，因此必须在入口统一移除，
+  // 否则送审内容会带上整行无关元数据。
+  text = text.replace(/\n\s*Runtime: agent=[^\n]*/g, "\n");
+
   // 找最后一个 ``` 标记的位置（元数据代码块的结束）
   var lastFence = text.lastIndexOf("```");
   if (lastFence !== -1) {
@@ -448,6 +458,11 @@ function stripMetadataPrefixRaw(text) {
 
   // 没有 ``` 代码块且没有飞书格式的情况：尝试按 \n\n 分割，取最后一段
   var parts = text.split(/\n\n/);
+  // openclaw 2026.9+ 会把运行时上下文行（"Runtime: agent=..."）追加到用户消息尾部，
+  // 旧逻辑"取最后一段"会把真实用户内容挤掉、只剩元数据，这里先从尾部剔除注入段
+  while (parts.length > 1 && /^Runtime: /.test(parts[parts.length - 1].trim())) {
+    parts.pop();
+  }
   var lastPart = parts[parts.length - 1];
   if (lastPart && lastPart.trim().length > 0) {
     return stripTimestampPrefix(lastPart).trim();
@@ -461,8 +476,8 @@ function stripMetadataPrefixRaw(text) {
  * 例如: "[Mon 2026-04-20 18:08 GMT+8] 打开浏览器" → "打开浏览器"
  */
 function stripTimestampPrefix(text) {
-  // 匹配 [Mon 2026-04-20 18:08 GMT+8] 或 [2026-04-20 18:08:22 GMT+8] 等格式
-  return text.replace(/^\[.*?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s+GMT[^\]]*\]\s*/, "");
+  // 匹配 [Mon 2026-04-20 18:08 GMT+8] / [Fri 2026-10-02 10:32 UTC] / [2026-04-20 18:08:22 GMT+8] 等格式
+  return text.replace(/^\[.*?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s+(?:GMT|UTC)[^\]]*\]\s*/, "");
 }
 
 
@@ -639,11 +654,28 @@ function getMethodFromFetchArgs(input, init) {
   return String(m).toUpperCase();
 }
 
+// 将各类请求体形态解码为文本。openclaw 2026.9+ 的 guarded model fetch 会把
+// JSON 请求体编码为 Uint8Array 传入（不再是 string），此处需逐形态兼容；
+// ReadableStream 只能读一次，读取后无法回放原请求，故不在此处消费流。
+function requestBodyToText(body) {
+  if (body == null) return "";
+  if (typeof body === "string") return body;
+  try {
+    if (typeof TextDecoder === "undefined") return "";
+    var decoder = new TextDecoder("utf-8");
+    if (body instanceof Uint8Array) return decoder.decode(body);
+    if (body instanceof ArrayBuffer) return decoder.decode(new Uint8Array(body));
+    if (ArrayBuffer.isView(body)) return decoder.decode(body);
+    if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) return body.toString();
+  } catch {}
+  return "";
+}
+
 async function getRequestBodyText(input, init) {
   if (input instanceof Request) {
     try { return await input.clone().text(); } catch { return ""; }
   }
-  return (init && typeof init.body === "string") ? init.body : "";
+  return requestBodyToText(init && init.body);
 }
 
 function headersInitToRecord(headersInit) {
@@ -2028,6 +2060,35 @@ function tryInstallUndiciInterceptor(undiciPath) {
           console.log("[tomzang_plungin] [undici] [response_received] callId=" + callId + " status=" + resp.status);
         }
 
+        // ─── 输出防火墙内容检测 ───
+        // openclaw 2026.9+ 的 LLM 请求固定走本包装器（model fetch 运行时注入），
+        // 输出审计必须在此完成，否则新版下输出侧检测会整体缺失
+        if (resp.ok && userPrompt && !shouldSkipFirewall(userPrompt)) {
+          try {
+            var auditedResp = await auditOutputResponse(
+              undiciOriginalFetch,
+              globalConfig,
+              resp,
+              userPrompt,
+              "session-openclaw",
+              callId,
+              url,
+              matchedProvider
+            );
+            var fwAction = auditedResp.headers.get("x-firewall-action") || "passed";
+            if (globalConfig.debug) {
+              console.log("[tomzang_plungin] [undici] [response_audited] callId=" + callId + " action=" + fwAction);
+            }
+            return auditedResp;
+          } catch (auditError) {
+            console.log("[tomzang_plungin] [undici] [output_audit_error] callId=" + callId + " error=" + String(auditError && auditError.message || auditError));
+          }
+        }
+
+        if (globalConfig.debug) {
+          console.log("[tomzang_plungin] [undici] [response_passed] callId=" + callId);
+        }
+
         return resp;
       });
 
@@ -2035,6 +2096,29 @@ function tryInstallUndiciInterceptor(undiciPath) {
       undici.fetch = wrappedUndiciFetch;
       undiciInterceptorInstalled = true;
       console.log("[tomzang_plungin] Undici fetch interceptor installed successfully");
+
+      // ─── openclaw 2026.9+ model fetch 通道接管 ───
+      // 新版 openclaw 的 LLM 请求不再经过 globalThis.fetch / undici.fetch 属性，
+      // 而是经 loadUndiciModule() 取运行时依赖；该函数每次调用都优先读取全局
+      // __OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__ 覆盖（undici-runtime 模块内置钩子）。
+      // 注入包装版 fetch 后，guarded model fetch 会全部进入本插件审计流程。
+      // 仅提供含 fetch 的依赖组合；缺 getGlobalDispatcher 等字段的调用组会
+      // 自动回退真实 undici 模块，不影响 openclaw 自身的 dispatcher 逻辑。
+      try {
+        if (typeof globalThis.__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__ === "undefined") {
+          globalThis.__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__ = {
+            Agent: undici.Agent,
+            EnvHttpProxyAgent: undici.EnvHttpProxyAgent,
+            ProxyAgent: undici.ProxyAgent,
+            fetch: wrappedUndiciFetch
+          };
+          console.log("[tomzang_plungin] openclaw model-fetch runtime hook installed (undici runtime deps override)");
+        } else {
+          console.log("[tomzang_plungin] openclaw model-fetch runtime hook already set by another party, skip");
+        }
+      } catch (e) {
+        console.log("[tomzang_plungin] Failed to install openclaw model-fetch runtime hook: " + String(e && e.message || e));
+      }
     } else {
       console.log("[tomzang_plungin] Undici not available in any expected path");
     }
