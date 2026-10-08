@@ -3,6 +3,8 @@
 var PLUGIN_VERSION = "v2026-10-02";
 var fs = require("fs");
 var os = require("os");
+var crypto = require("crypto");
+var execSync = require("child_process").execSync;
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感关键字，已被安全组件拦截";
 // 所有拦截场景统一展示给用户的提示语（blockTip 未配置时的兜底文案）
 var DEFAULT_BLOCK_TIP = "抱歉，我无法执行该请求。作为智能助手，我会在我的设定范围内提供帮助。如果你有合法的需求，请正常描述，我会尽力协助。";
@@ -102,6 +104,131 @@ function logDebug(category, action, data) {
   }
 }
 
+// ─── 设备标识 ───
+
+// 采集结果缓存：硬件指纹在进程存活期间不变，避免每次防火墙校验都执行 execSync（macOS 的 system_profiler 单次可达秒级）
+var cachedDeviceId = null;
+
+// 获取设备唯一标识ID（SHA256 硬件指纹，拼接规则与 install.sh 的 get_device_id 保持一致，两侧必须产出相同值）
+function getDeviceId() {
+  if (cachedDeviceId) return cachedDeviceId;
+
+  var hardwareIds = [];
+  var platform = os.platform();
+  var execOptions = { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] };
+
+  try {
+    // 获取 CPU 信息
+    var cpuInfo = "";
+    if (platform === "linux") {
+      try {
+        cpuInfo = execSync("cat /proc/cpuinfo | grep 'processor\\|model name' | head -1", execOptions).trim();
+      } catch (_) {
+        cpuInfo = "";
+      }
+    } else if (platform === "darwin") {
+      try {
+        cpuInfo = execSync("sysctl -n machdep.cpu.brand_string", execOptions).trim();
+      } catch (_) {
+        cpuInfo = "";
+      }
+    } else if (platform === "win32") {
+      try {
+        cpuInfo = execSync("wmic cpu get ProcessorId /value", execOptions).trim().replace(/ProcessorId=/, "").replace(/\r?\n/g, "");
+      } catch (_) {
+        cpuInfo = "";
+      }
+    }
+    if (cpuInfo) hardwareIds.push(cpuInfo);
+
+    // 获取主板信息
+    var boardInfo = "";
+    if (platform === "linux") {
+      try {
+        boardInfo = execSync("dmidecode -s baseboard-serial-number 2>/dev/null || cat /sys/class/dmi/id/board_serial 2>/dev/null || echo ''", { shell: true, ...execOptions }).trim();
+      } catch (_) {
+        boardInfo = "";
+      }
+    } else if (platform === "darwin") {
+      try {
+        boardInfo = execSync("system_profiler SPHardwareDataType | grep 'Serial Number' | awk '{print $3}'", execOptions).trim();
+      } catch (_) {
+        boardInfo = "";
+      }
+    } else if (platform === "win32") {
+      try {
+        boardInfo = execSync("wmic baseboard get SerialNumber /value", execOptions).trim().replace(/SerialNumber=/, "").replace(/\r?\n/g, "");
+      } catch (_) {
+        boardInfo = "";
+      }
+    }
+    if (boardInfo) hardwareIds.push(boardInfo);
+
+    // 获取磁盘序列号（首分区/主磁盘）
+    var diskInfo = "";
+    if (platform === "linux") {
+      try {
+        diskInfo = execSync("lsblk -d -o name,serial | head -2 | tail -1 | awk '{print $2}'", execOptions).trim();
+      } catch (_) {
+        diskInfo = "";
+      }
+    } else if (platform === "darwin") {
+      try {
+        diskInfo = execSync("diskutil info / | grep 'Disk UUID' | awk '{print $3}'", execOptions).trim();
+      } catch (_) {
+        diskInfo = "";
+      }
+    } else if (platform === "win32") {
+      try {
+        diskInfo = execSync("wmic diskdrive get SerialNumber /value", execOptions).trim().replace(/SerialNumber=/, "").replace(/\r?\n/g, "");
+      } catch (_) {
+        diskInfo = "";
+      }
+    }
+    if (diskInfo) hardwareIds.push(diskInfo);
+
+    // 获取首张网卡 MAC 地址
+    var macInfo = "";
+    var networkInterfaces = os.networkInterfaces();
+    var interfaces = Object.keys(networkInterfaces);
+    for (var i = 0; i < interfaces.length; i++) {
+      var iface = interfaces[i];
+      // 跳过本地回环接口
+      if (iface === "lo" || iface.indexOf("Loopback") >= 0) continue;
+
+      var addrs = networkInterfaces[iface];
+      for (var j = 0; j < addrs.length; j++) {
+        var addr = addrs[j];
+        if (addr.family === "IPv4" && !addr.internal) {
+          macInfo = addr.mac;
+          break;
+        }
+      }
+      if (macInfo) break;
+    }
+    if (macInfo) hardwareIds.push(macInfo);
+
+    // 如果获取不到任何硬件信息，使用主机名和平台信息作为后备
+    if (hardwareIds.length === 0) {
+      hardwareIds.push(os.hostname());
+      hardwareIds.push(platform);
+      hardwareIds.push(os.arch());
+      hardwareIds.push(os.release());
+    }
+
+    // 拼接所有硬件ID并进行 SHA256 hash
+    var combined = hardwareIds.join("|");
+    cachedDeviceId = crypto.createHash("sha256").update(combined).digest("hex");
+
+    return cachedDeviceId;
+  } catch (e) {
+    // 获取失败时使用主机名和平台信息
+    var fallbackCombined = os.hostname() + "|" + os.platform() + "|" + os.arch() + "|" + os.release();
+    cachedDeviceId = crypto.createHash("sha256").update(fallbackCombined).digest("hex");
+    return cachedDeviceId;
+  }
+}
+
 // ─── 防火墙API调用 ───
 
 var firewallCallId = 0;
@@ -119,6 +246,7 @@ async function callFirewallApi(fetchFn, config, prompt, response, sessionId, sta
       var v = process.env.GROUP_CHAT_ALLOWED_SENDERS;
       return (typeof v === "string" || typeof v === "number") ? String(v) : "";
     })(),
+    device_id: getDeviceId(),
     content_type: "text",
     content: {
       prompt: prompt || "",

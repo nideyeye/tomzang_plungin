@@ -15,6 +15,16 @@ TMP_DIR="$(mktemp -d -t ${PLUGIN_ID}.XXXXXX)"
 # 记录本次运行产生的配置文件备份路径, 便于在重启失败时提示用户手动还原
 CONFIG_FILE_BACKUP=""
 
+# -------- 设备注册信息 (register_device 填充) --------
+DEVICE_ID=""
+PLATFORM=""
+OS_STRING=""
+IP_ADDRESS=""
+APP_VERSION=""
+APP_TYP=""
+# 与 index.js 顶部的 PLUGIN_VERSION 常量保持一致 (register_device 会优先读取部署目录中的真实值)
+PLUGIN_VERSION="v2026-10-02"
+
 # -------- 工具函数 --------
 log()  { printf '[%s] [INFO]  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 warn() { printf '[%s] [WARN]  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
@@ -418,6 +428,270 @@ restart_gateway() {
   return 1
 }
 
+# -------- 设备注册 (device_id 生成规则与 index.js 的 getDeviceId 保持一致, 两侧必须产出相同值) --------
+
+# 检测操作系统平台
+get_platform() {
+  local os_name
+  os_name=$(uname -s)
+  case "${os_name}" in
+    Darwin)
+      PLATFORM="mac"
+      ;;
+    Linux)
+      PLATFORM="linux"
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      PLATFORM="windows"
+      ;;
+    *)
+      PLATFORM="unknown"
+      ;;
+  esac
+}
+
+# 获取操作系统版本字符串
+get_os_string() {
+  local os_name
+  os_name=$(uname -s)
+  case "${os_name}" in
+    Darwin)
+      local macos_name macos_ver
+      macos_name=$(sw_vers -productName 2>/dev/null || echo "macOS")
+      macos_ver=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+      OS_STRING="${macos_name} ${macos_ver}"
+      ;;
+    Linux)
+      if [[ -f /etc/os-release ]]; then
+        OS_STRING=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"') || true
+      fi
+      if [[ -z "${OS_STRING}" ]] && [[ -f /etc/lsb-release ]]; then
+        OS_STRING=$(grep DESCRIPTION /etc/lsb-release | cut -d= -f2 | tr -d '"') || true
+      fi
+      if [[ -z "${OS_STRING}" ]]; then
+        OS_STRING="Linux $(uname -r)"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      OS_STRING="Windows $(uname -r)"
+      ;;
+    *)
+      OS_STRING="${os_name} $(uname -r)"
+      ;;
+  esac
+}
+
+# 获取本机主 IP 地址
+get_ip_address() {
+  local os_name
+  os_name=$(uname -s)
+  case "${os_name}" in
+    Darwin)
+      local default_iface
+      default_iface=$(route -n get default 2>/dev/null | grep 'interface:' | awk '{print $2}') || true
+      if [[ -n "${default_iface}" ]]; then
+        IP_ADDRESS=$(ifconfig "${default_iface}" 2>/dev/null | grep 'inet ' | awk '{print $2}') || true
+      fi
+      ;;
+    Linux)
+      IP_ADDRESS=$(ip route get 1 2>/dev/null | awk '{print $NF; exit}') || true
+      if [[ -z "${IP_ADDRESS}" ]]; then
+        IP_ADDRESS=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      IP_ADDRESS=$(ipconfig 2>/dev/null | grep 'IPv4' | head -1 | awk '{print $NF}') || true
+      ;;
+  esac
+  if [[ -z "${IP_ADDRESS}" ]]; then
+    IP_ADDRESS=$(hostname 2>/dev/null || echo "127.0.0.1")
+  fi
+}
+
+# 获取设备唯一标识 (SHA256 硬件指纹, 与 index.js 保持一致)
+get_device_id() {
+  local hardware_ids=()
+  local os_name
+  os_name=$(uname -s)
+
+  # CPU 信息
+  local cpu_info=""
+  if [[ "${os_name}" == "Linux" ]]; then
+    cpu_info=$(grep -E 'processor|model name' /proc/cpuinfo 2>/dev/null | head -1) || true
+  elif [[ "${os_name}" == "Darwin" ]]; then
+    cpu_info=$(sysctl -n machdep.cpu.brand_string 2>/dev/null) || true
+  fi
+  if [[ -n "${cpu_info}" ]]; then
+    hardware_ids+=("${cpu_info}")
+  fi
+
+  # 主板信息
+  local board_info=""
+  if [[ "${os_name}" == "Linux" ]]; then
+    board_info=$(dmidecode -s baseboard-serial-number 2>/dev/null || cat /sys/class/dmi/id/board_serial 2>/dev/null || echo "")
+    board_info=$(echo "${board_info}" | xargs)
+  elif [[ "${os_name}" == "Darwin" ]]; then
+    board_info=$(system_profiler SPHardwareDataType 2>/dev/null | grep 'Serial Number' | awk '{print $3}') || true
+  fi
+  if [[ -n "${board_info}" ]]; then
+    hardware_ids+=("${board_info}")
+  fi
+
+  # 磁盘序列号
+  local disk_info=""
+  if [[ "${os_name}" == "Linux" ]]; then
+    disk_info=$(lsblk -d -o name,serial 2>/dev/null | head -2 | tail -1 | awk '{print $2}') || true
+  elif [[ "${os_name}" == "Darwin" ]]; then
+    disk_info=$(diskutil info / 2>/dev/null | grep 'Disk UUID' | awk '{print $3}') || true
+  fi
+  if [[ -n "${disk_info}" ]]; then
+    hardware_ids+=("${disk_info}")
+  fi
+
+  # MAC 地址 (第一个非 loopback 的 IPv4 接口, 与 index.js 一致)
+  local mac_info=""
+  if [[ "${os_name}" == "Linux" ]]; then
+    local iface_path
+    for iface_path in /sys/class/net/*/address; do
+      [[ -f "${iface_path}" ]] || continue
+      local ifname
+      ifname=$(basename "$(dirname "${iface_path}")")
+      [[ "${ifname}" == "lo" ]] && continue
+      local addr
+      addr=$(cat "${iface_path}" 2>/dev/null | tr -d '\n') || true
+      if [[ -n "${addr}" ]] && ip addr show "${ifname}" 2>/dev/null | grep -q 'inet '; then
+        mac_info="${addr}"
+        break
+      fi
+    done
+  elif [[ "${os_name}" == "Darwin" ]]; then
+    local iface_list
+    iface_list=$(ifconfig -l 2>/dev/null) || true
+    for ifname in ${iface_list}; do
+      [[ "${ifname}" == "lo0" ]] && continue
+      local mac
+      mac=$(ifconfig "${ifname}" 2>/dev/null | grep 'ether' | awk '{print $2}') || true
+      if [[ -n "${mac}" ]] && ifconfig "${ifname}" 2>/dev/null | grep -q 'inet '; then
+        mac_info="${mac}"
+        break
+      fi
+    done
+  fi
+  if [[ -n "${mac_info}" ]]; then
+    hardware_ids+=("${mac_info}")
+  fi
+
+  # 拼接所有硬件 ID 进行 SHA256 hash
+  local combined
+  if [[ ${#hardware_ids[@]} -eq 0 ]]; then
+    # 未获取到硬件信息时使用后备方案 (需与 index.js 一致: hostname|platform|arch|release)
+    local platform_lower
+    platform_lower=$(echo "${os_name}" | tr '[:upper:]' '[:lower:]')
+    combined="$(hostname 2>/dev/null || echo 'unknown')|${platform_lower}|$(uname -m)|$(uname -r)"
+  else
+    combined=$(printf '%s|' "${hardware_ids[@]}")
+    combined="${combined%|}"
+  fi
+
+  DEVICE_ID=$(echo -n "${combined}" | shasum -a 256 2>/dev/null | cut -d' ' -f1) || true
+  if [[ -z "${DEVICE_ID}" ]]; then
+    DEVICE_ID=$(echo -n "${combined}" | sha256sum 2>/dev/null | cut -d' ' -f1) || true
+  fi
+  if [[ -z "${DEVICE_ID}" ]]; then
+    err "无法计算设备标识 (需要 shasum 或 sha256sum 命令)"
+    return 1
+  fi
+}
+
+# 检测 openclaw 版本
+detect_openclaw_version() {
+  APP_TYP="openclaw"
+  APP_VERSION="unknown"
+  if [[ "${HAS_OPENCLAW}" -eq 1 ]]; then
+    local v
+    v=$(openclaw --version 2>/dev/null) || true
+    if [[ -n "${v}" ]]; then
+      APP_VERSION="${v}"
+    fi
+  fi
+}
+
+# 优先读取部署目录 index.js 中的真实 PLUGIN_VERSION 常量, 失败时退回脚本内置值
+resolve_plugin_version() {
+  local idx="${PLUGIN_DIR}/index.js"
+  if [[ -f "${idx}" ]]; then
+    local v
+    v=$(grep -m1 -E '^[[:space:]]*var PLUGIN_VERSION = "' "${idx}" 2>/dev/null \
+        | sed -E 's/.*PLUGIN_VERSION = "([^"]+)".*/\1/') || true
+    if [[ -n "${v}" ]]; then
+      PLUGIN_VERSION="${v}"
+    fi
+  fi
+}
+
+# 设备注册: 收集信息并调用注册 API
+register_device() {
+  need_cmd curl
+
+  local register_url="${FIREWALL_URL%/}/api/firewall/openclaw/device/register"
+
+  log "正在收集设备信息..."
+  get_platform
+  get_os_string
+  get_ip_address
+  get_device_id || return 1
+  detect_openclaw_version
+  resolve_plugin_version
+
+  log "设备信息:"
+  log "  平台: ${PLATFORM} | 系统: ${OS_STRING}"
+  log "  设备ID: ${DEVICE_ID}"
+  log "  IP: ${IP_ADDRESS} | openclaw: ${APP_VERSION} | 插件: ${PLUGIN_VERSION}"
+
+  log "正在向服务器注册设备..."
+  local http_code
+  local temp_response
+  temp_response=$(mktemp)
+
+  set +e
+  http_code=$(curl -s -o "${temp_response}" -w "%{http_code}" \
+      --request POST \
+      --url "${register_url}" \
+      --header 'Content-Type: application/json' \
+      --header 'Accept: */*' \
+      --header 'Accept-Encoding: gzip, deflate, br' \
+      --header 'Connection: keep-alive' \
+      --header 'User-Agent: OpenClaw-Installer/1.0' \
+      --data "{
+          \"auth_key\":\"${AUTH_KEY}\",
+          \"device_id\":\"${DEVICE_ID}\",
+          \"ip\":\"${IP_ADDRESS}\",
+          \"os\":\"${OS_STRING}\",
+          \"platform\":\"${PLATFORM}\",
+          \"app_version\":\"${APP_VERSION}\",
+          \"app_typ\":\"${APP_TYP}\",
+          \"plugin_version\":\"${PLUGIN_VERSION}\"
+      }" 2>/dev/null)
+  local curl_exit=$?
+  set -e
+
+  local response_body
+  response_body=$(cat "${temp_response}" 2>/dev/null || echo "")
+  rm -f "${temp_response}"
+
+  if [[ ${curl_exit} -ne 0 ]]; then
+    err "设备注册失败: curl 错误 (exit=${curl_exit})"
+    return 1
+  fi
+  if [[ "${http_code}" != "200" ]]; then
+    err "设备注册失败 (HTTP ${http_code}): ${response_body}"
+    return 1
+  fi
+
+  log "设备注册成功 (device_id: ${DEVICE_ID})"
+  return 0
+}
+
 # -------- 主流程 --------
 main() {
   # Step 0: 先卸载旧版本（如果存在）
@@ -475,7 +749,17 @@ main() {
 
   log "${PLUGIN_ID} 安装完成"
 
-  # Step 5: 自动重启 gateway 以使配置生效, 失败时输出日志与备份路径
+  # Step 5: 设备注册 (配置了防火墙时必须成功才能继续, 失败则中止安装)
+  if [[ -n "${FIREWALL_URL}" ]] && [[ -n "${AUTH_KEY}" ]]; then
+    if ! register_device; then
+      print_backup_hint
+      exit 5
+    fi
+  else
+    warn "未配置 firewall-url 和 auth-key, 跳过设备注册"
+  fi
+
+  # Step 6: 自动重启 gateway 以使配置生效, 失败时输出日志与备份路径
   if ! restart_gateway; then
     exit 4
   fi
