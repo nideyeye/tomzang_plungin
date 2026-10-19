@@ -14,20 +14,26 @@
 #    ./install.sh <firewallUrl> <authKey>           # 后端地址与密钥必传（位置参数，与 tomzang_plungin 一致）
 #    ./install.sh <url> <key> true "自定义拦截提示"
 #    ./install.sh --url <url> --key <key> --debug true --skip-register
-#    单文件也能装（脚本会自动从 GitHub 下载整包）：
-#    curl -fsSL <仓库 raw 地址>/workbuddy/install.sh -o install.sh && chmod +x install.sh && ./install.sh <url> <key>
+#    单文件也能装（脚本会自动从 GitHub 下载整包，多源重试）：
+#    curl -fsSL <脚本下载地址>/install.sh -o install.sh && chmod +x install.sh && ./install.sh <url> <key>
 #
 #  环境变量（优先级低于命令行参数）：WB_FIREWALL_URL / WB_FIREWALL_AUTH_KEY
-#  WB_FIREWALL_PKG_URL 可覆盖整包下载地址（默认 GitHub workbuddy 分支归档，调试/镜像用）
+#  WB_FIREWALL_PKG_URL 可覆盖整包下载地址（设置后只走这一个地址；默认依次尝试 GitHub 直连 + 国内加速镜像）
 # ============================================================
 
 set -uo pipefail
 
 PLUGIN_ID="wb-firewall-guard"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 引导下载：脚本旁边没有 dist/ 时从这个地址拉整包（WB_FIREWALL_PKG_URL 可覆盖）
-DEFAULT_PKG_URL="https://github.com/nideyeye/tomzang_plungin/archive/refs/heads/workbuddy.tar.gz"
-PACKAGE_URL="${WB_FIREWALL_PKG_URL:-${DEFAULT_PKG_URL}}"
+# 引导下载：脚本旁边没有 dist/ 时按顺序尝试这些下载源（GitHub 直连优先，失败自动换国内可达的加速镜像）
+# WB_FIREWALL_PKG_URL 可整体覆盖（设置后只走这一个地址，调试/镜像用）
+PKG_BASE="https://github.com/nideyeye/tomzang_plungin/archive/refs/heads/workbuddy.tar.gz"
+DEFAULT_PKG_URLS=("${PKG_BASE}" "https://ghproxy.net/${PKG_BASE}" "https://gh-proxy.com/${PKG_BASE}")
+if [[ -n "${WB_FIREWALL_PKG_URL:-}" ]]; then
+  PACKAGE_URLS=("${WB_FIREWALL_PKG_URL}")
+else
+  PACKAGE_URLS=("${DEFAULT_PKG_URLS[@]}")
+fi
 PKG_DIR="${SCRIPT_DIR}/wb-firewall-guard-pkg"
 ROOT=""   # 安装包根目录：脚本所在目录本身，或引导下载的解压目录，由完整性检测决定
 TARGET="${HOME}/.workbuddy/plugins/${PLUGIN_ID}"
@@ -46,15 +52,24 @@ pkg_complete() {
 }
 
 bootstrap_package() {
-  log "安装包不完整，正在从 GitHub 下载整包: ${PACKAGE_URL}"
-  local archive
+  local archive url
   archive="$(mktemp "${TMPDIR:-/tmp}/wbfg-pkg.XXXXXX")" || return 1
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --connect-timeout 15 --max-time 300 "${PACKAGE_URL}" -o "${archive}" || { err "下载失败（curl）"; rm -f "${archive}"; return 1; }
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q --timeout=30 "${PACKAGE_URL}" -O "${archive}" || { err "下载失败（wget）"; rm -f "${archive}"; return 1; }
-  else
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     err "未找到 curl / wget，无法下载安装包"
+    rm -f "${archive}"
+    return 1
+  fi
+  for url in "${PACKAGE_URLS[@]}"; do
+    log "安装包不完整，正在下载整包: ${url}"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL --connect-timeout 15 --max-time 300 "${url}" -o "${archive}" && break
+    else
+      wget -q --timeout=30 "${url}" -O "${archive}" && break
+    fi
+    warn "该下载源失败，换下一个源重试"
+  done
+  if [[ ! -s "${archive}" ]]; then
+    err "所有下载源均失败（共 ${#PACKAGE_URLS[@]} 个）"
     rm -f "${archive}"
     return 1
   fi
@@ -150,7 +165,7 @@ else
     done
   fi
   if [[ -z "${ROOT}" ]]; then
-    err "无法获得完整安装包：当前目录不完整，GitHub 下载/解压失败，且本地无可用缓存"
+    err "无法获得完整安装包：当前目录不完整，所有下载源均失败，且本地无可用缓存"
     exit 2
   fi
   [[ "${BOOTSTRAP_OK}" -eq 1 ]] || warn "下载失败，改用本地已缓存的安装包: ${ROOT}"

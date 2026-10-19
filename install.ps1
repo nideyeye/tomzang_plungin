@@ -12,10 +12,10 @@
 #  用法（PowerShell，管理员权限非必需）：
 #    .\install.ps1 -FirewallUrl http://${防火墙服务地址}/ -AuthKey ${页面上生成的 key}
 #    .\install.ps1 -DebugLog true -SkipRegister
-#    单文件也能装（脚本会自动从 GitHub 下载整包）：
-#    irm <仓库 raw 地址>/workbuddy/install.ps1 -OutFile install.ps1; powershell -ExecutionPolicy Bypass -File .\install.ps1 -FirewallUrl <url> -AuthKey <key>
+#    单文件也能装（脚本会自动从 GitHub 下载整包，多源重试）：
+#    irm <脚本下载地址>/install.ps1 -OutFile install.ps1; powershell -ExecutionPolicy Bypass -File .\install.ps1 -FirewallUrl <url> -AuthKey <key>
 #
-#  环境变量：WB_FIREWALL_URL / WB_FIREWALL_AUTH_KEY / WB_FIREWALL_PKG_URL（覆盖整包下载地址，调试/镜像用）
+#  环境变量：WB_FIREWALL_URL / WB_FIREWALL_AUTH_KEY / WB_FIREWALL_PKG_URL（覆盖整包下载地址，设置后只走这一个地址；默认依次尝试 GitHub 直连 + 国内加速镜像）
 #
 #  双击 install.bat 等同于以默认参数运行本脚本。
 # ============================================================
@@ -36,9 +36,11 @@ $ErrorActionPreference = "Stop"
 
 $PLUGIN_ID = "wb-firewall-guard"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-# 引导下载：脚本旁边没有 dist\ 时从这个地址拉整包（WB_FIREWALL_PKG_URL 可覆盖）
-$PackageUrl = "https://github.com/nideyeye/tomzang_plungin/archive/refs/heads/workbuddy.zip"
-if ($env:WB_FIREWALL_PKG_URL) { $PackageUrl = $env:WB_FIREWALL_PKG_URL }
+# 引导下载：脚本旁边没有 dist\ 时按顺序尝试这些下载源（GitHub 直连优先，失败自动换国内可达的加速镜像）
+# WB_FIREWALL_PKG_URL 可整体覆盖（设置后只走这一个地址，调试/镜像用）
+$PkgBase = "https://github.com/nideyeye/tomzang_plungin/archive/refs/heads/workbuddy.zip"
+$PackageUrls = @($PkgBase, "https://ghproxy.net/$PkgBase", "https://gh-proxy.com/$PkgBase")
+if ($env:WB_FIREWALL_PKG_URL) { $PackageUrls = @($env:WB_FIREWALL_PKG_URL) }
 $PkgDir = Join-Path $ScriptDir "wb-firewall-guard-pkg"
 $Root = ""   # 安装包根目录：脚本所在目录本身，或引导下载的解压目录，由完整性检测决定
 
@@ -112,20 +114,35 @@ if (Test-PackageComplete $ScriptDir) {
     $Root = $ScriptDir
 } else {
     $bootstrapOk = $true
-    Write-Log "安装包不完整，正在从 GitHub 下载整包: $PackageUrl"
     $tmpArchive = Join-Path ([System.IO.Path]::GetTempPath()) "wbfg-pkg.download"
-    try {
-        Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 $PackageUrl -OutFile $tmpArchive
-        # 下载成功后才清掉旧缓存目录，下载失败时旧包还在，可作离线兜底
-        if (Test-Path $PkgDir) { Remove-Item -Recurse -Force $PkgDir }
-        New-Item -ItemType Directory -Path $PkgDir | Out-Null
-        Expand-Archive -Path $tmpArchive -DestinationPath $PkgDir -Force
-    } catch {
-        $bootstrapOk = $false
-        Write-ErrMsg "下载/解压安装包失败: $($_.Exception.Message)"
-    } finally {
-        if (Test-Path $tmpArchive) { Remove-Item $tmpArchive -Force -ErrorAction SilentlyContinue }
+    # Windows PowerShell 5.1 默认不启用 TLS 1.2，GitHub / 镜像站都要求
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    $downloaded = $false
+    foreach ($u in $PackageUrls) {
+        Write-Log "安装包不完整，正在下载整包: $u"
+        try {
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 $u -OutFile $tmpArchive
+            $downloaded = $true
+            break
+        } catch {
+            Write-WarnMsg "该下载源失败，换下一个源重试: $($_.Exception.Message)"
+        }
     }
+    if (-not $downloaded) {
+        $bootstrapOk = $false
+        Write-ErrMsg "所有下载源均失败（共 $($PackageUrls.Count) 个）"
+    } else {
+        try {
+            # 下载成功后才清掉旧缓存目录，下载失败时旧包还在，可作离线兜底
+            if (Test-Path $PkgDir) { Remove-Item -Recurse -Force $PkgDir }
+            New-Item -ItemType Directory -Path $PkgDir | Out-Null
+            Expand-Archive -Path $tmpArchive -DestinationPath $PkgDir -Force
+        } catch {
+            $bootstrapOk = $false
+            Write-ErrMsg "解压安装包失败: $($_.Exception.Message)"
+        }
+    }
+    if (Test-Path $tmpArchive) { Remove-Item $tmpArchive -Force -ErrorAction SilentlyContinue }
     if (Test-PackageComplete $PkgDir) {
         $Root = $PkgDir
     } else {
@@ -135,7 +152,7 @@ if (Test-PackageComplete $ScriptDir) {
         }
     }
     if (-not $Root) {
-        Write-ErrMsg "无法获得完整安装包：当前目录不完整，GitHub 下载/解压失败，且本地无可用缓存"
+        Write-ErrMsg "无法获得完整安装包：当前目录不完整，所有下载源均失败，且本地无可用缓存"
         exit 2
     }
     if (-not $bootstrapOk) { Write-WarnMsg "下载失败，改用本地已缓存的安装包: $Root" }
