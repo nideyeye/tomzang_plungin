@@ -2,6 +2,7 @@
 #  wb-firewall-guard 一键安装（Windows / PowerShell）
 #
 #  做了什么：
+#    0. 检测安装包完整性：不完整（例如只下载了本脚本一个文件）时自动从 GitHub 下载整包解压后继续
 #    1. 部署插件到 $HOME\.workbuddy\plugins\wb-firewall-guard（旧版本自动备份，只留最近 3 份）
 #    2. 写入 config.json（firewallUrl / authKey / debug / blockTip …）
 #    3. 备份 $HOME\.workbuddy\settings.json 并把 6 个钩子合并进去（幂等）
@@ -11,6 +12,10 @@
 #  用法（PowerShell，管理员权限非必需）：
 #    .\install.ps1 -FirewallUrl http://${防火墙服务地址}/ -AuthKey ${页面上生成的 key}
 #    .\install.ps1 -DebugLog true -SkipRegister
+#    单文件也能装（脚本会自动从 GitHub 下载整包）：
+#    irm <仓库 raw 地址>/workbuddy/install.ps1 -OutFile install.ps1; powershell -ExecutionPolicy Bypass -File .\install.ps1 -FirewallUrl <url> -AuthKey <key>
+#
+#  环境变量：WB_FIREWALL_URL / WB_FIREWALL_AUTH_KEY / WB_FIREWALL_PKG_URL（覆盖整包下载地址，调试/镜像用）
 #
 #  双击 install.bat 等同于以默认参数运行本脚本。
 # ============================================================
@@ -30,8 +35,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 $PLUGIN_ID = "wb-firewall-guard"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Helper = Join-Path $Root "dist\install-helper.mjs"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# 引导下载：脚本旁边没有 dist\ 时从这个地址拉整包（WB_FIREWALL_PKG_URL 可覆盖）
+$PackageUrl = "https://github.com/nideyeye/tomzang_plungin/archive/refs/heads/workbuddy.zip"
+if ($env:WB_FIREWALL_PKG_URL) { $PackageUrl = $env:WB_FIREWALL_PKG_URL }
+$PkgDir = Join-Path $ScriptDir "wb-firewall-guard-pkg"
+$Root = ""   # 安装包根目录：脚本所在目录本身，或引导下载的解压目录，由完整性检测决定
 
 function Write-Log([string]$Msg) {
     Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [INFO]  $Msg"
@@ -89,6 +98,50 @@ if (-not $NodeBin) {
 }
 $nodeVersion = (& $NodeBin --version 2>$null)
 Write-Log "node = $NodeBin ($nodeVersion)"
+
+# -------- 安装包完整性：单文件运行时自动从 GitHub 引导下载整包 --------
+function Test-PackageComplete([string]$Dir) {
+    if (-not $Dir -or -not (Test-Path $Dir)) { return $false }
+    foreach ($rel in @("dist\install-helper.mjs", "dist\guard.mjs", "dist\firewall.mjs", "dist\extract.mjs", "config.example.json")) {
+        if (-not (Test-Path (Join-Path $Dir $rel))) { return $false }
+    }
+    return $true
+}
+
+if (Test-PackageComplete $ScriptDir) {
+    $Root = $ScriptDir
+} else {
+    $bootstrapOk = $true
+    Write-Log "安装包不完整，正在从 GitHub 下载整包: $PackageUrl"
+    $tmpArchive = Join-Path ([System.IO.Path]::GetTempPath()) "wbfg-pkg.download"
+    try {
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 $PackageUrl -OutFile $tmpArchive
+        # 下载成功后才清掉旧缓存目录，下载失败时旧包还在，可作离线兜底
+        if (Test-Path $PkgDir) { Remove-Item -Recurse -Force $PkgDir }
+        New-Item -ItemType Directory -Path $PkgDir | Out-Null
+        Expand-Archive -Path $tmpArchive -DestinationPath $PkgDir -Force
+    } catch {
+        $bootstrapOk = $false
+        Write-ErrMsg "下载/解压安装包失败: $($_.Exception.Message)"
+    } finally {
+        if (Test-Path $tmpArchive) { Remove-Item $tmpArchive -Force -ErrorAction SilentlyContinue }
+    }
+    if (Test-PackageComplete $PkgDir) {
+        $Root = $PkgDir
+    } else {
+        # GitHub 归档会多一层 <repo>-<branch> 目录
+        foreach ($d in Get-ChildItem $PkgDir -Directory -ErrorAction SilentlyContinue) {
+            if (Test-PackageComplete $d.FullName) { $Root = $d.FullName; break }
+        }
+    }
+    if (-not $Root) {
+        Write-ErrMsg "无法获得完整安装包：当前目录不完整，GitHub 下载/解压失败，且本地无可用缓存"
+        exit 2
+    }
+    if (-not $bootstrapOk) { Write-WarnMsg "下载失败，改用本地已缓存的安装包: $Root" }
+}
+$Helper = Join-Path $Root "dist\install-helper.mjs"
+Write-Log "安装包目录: $Root"
 
 if (-not (Test-Path $Helper)) {
     Write-ErrMsg "找不到安装内核: $Helper（安装包不完整）"

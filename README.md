@@ -23,7 +23,15 @@ WorkBuddy 内容安全审计插件：把**用户输入、工具调用、工具�
 
 ## 一键安装
 
-### macOS / Linux
+脚本会先检测所在目录的安装包完整性：只下载了单个 install 脚本也没关系，会自动从 GitHub 拉取整包解压到脚本旁的 `wb-firewall-guard-pkg/` 再继续（下载失败时回退本地缓存；`WB_FIREWALL_PKG_URL` 可覆盖整包地址）。
+
+### macOS / Linux（单文件一键）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nideyeye/tomzang_plungin/workbuddy/install.sh -o install.sh && chmod +x install.sh && ./install.sh http://${防火墙服务地址}/ ${页面上生成的 key}
+```
+
+或从完整包安装：
 
 ```bash
 cd ~/Downloads/wb-firewall-guard
@@ -31,9 +39,13 @@ chmod +x install.sh uninstall.sh
 ./install.sh http://${防火墙服务地址}/ ${页面上生成的 key}
 ```
 
-### Windows
+### Windows（单文件一键）
 
-双击 **`install.bat`** 会转调 `install.ps1`（无参时同样会被校验拦下并提示填地址与密钥），推荐在 PowerShell 里：
+```powershell
+irm https://raw.githubusercontent.com/nideyeye/tomzang_plungin/workbuddy/install.ps1 -OutFile install.ps1; powershell -ExecutionPolicy Bypass -File .\install.ps1 -FirewallUrl http://${防火墙服务地址}/ -AuthKey ${页面上生成的 key}
+```
+
+双击 **`install.bat`**（完整包内）会转调 `install.ps1`（无参时同样会被校验拦下并提示填地址与密钥），或：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -FirewallUrl http://${防火墙服务地址}/ -AuthKey ${页面上生成的 key}
@@ -56,7 +68,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -FirewallUrl http://${防
 | `--skip-register` / `-SkipRegister` | 否 | 关 | 跳过设备注册（后端无 register 接口 / 离线安装时用） |
 
 \* `config.example.json` 已是 `${...}` 占位符模板：无参安装会检测到占位符直接报错退出（exit 2），必须在命令行传入真实值。本地内网批量安装可先把真实值写进 `config.example.json` 再无参运行。
-取值顺序：命令行参数 > 环境变量 `WB_FIREWALL_URL` / `WB_FIREWALL_AUTH_KEY` > `config.example.json`。
+取值顺序：命令行参数 > 环境变量 `WB_FIREWALL_URL` / `WB_FIREWALL_AUTH_KEY` > `config.example.json`。另有 `WB_FIREWALL_PKG_URL` 覆盖引导下载的整包地址（默认 GitHub workbuddy 分支归档）。
 
 ---
 
@@ -64,6 +76,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -FirewallUrl http://${防
 
 | 步骤 | 动作 |
 |---|---|
+| 0 | 检测安装包完整性（`dist/` + `config.example.json`），不完整时自动从 GitHub 下载整包解压到脚本旁的 `wb-firewall-guard-pkg/`，下载失败回退本地缓存 |
 | 1 | 部署插件到 `~/.workbuddy/plugins/wb-firewall-guard`，旧版本先备份（`.bak-<时间戳>`，自动只留最近 3 份） |
 | 2 | 合并写入 `config.json`（保留已有键，重装不丢配置） |
 | 3 | 备份 `settings.json`，把 6 个钩子合并进 `hooks` 字段；按 command 里的插件名去重，**重复安装不会堆积** |

@@ -3,6 +3,7 @@
 #  wb-firewall-guard 一键安装（macOS / Linux）
 #
 #  做了什么：
+#    0. 检测安装包完整性：不完整（例如只下载了本脚本一个文件）时自动从 GitHub 下载整包解压后继续
 #    1. 部署插件到 ~/.workbuddy/plugins/wb-firewall-guard（旧版本自动备份，只留最近 3 份）
 #    2. 写入 config.json（firewallUrl / authKey / debug / blockTip …）
 #    3. 备份 ~/.workbuddy/settings.json 并把 6 个钩子合并进去（幂等，重复执行不会堆积）
@@ -13,15 +14,22 @@
 #    ./install.sh <firewallUrl> <authKey>           # 后端地址与密钥必传（位置参数，与 tomzang_plungin 一致）
 #    ./install.sh <url> <key> true "自定义拦截提示"
 #    ./install.sh --url <url> --key <key> --debug true --skip-register
+#    单文件也能装（脚本会自动从 GitHub 下载整包）：
+#    curl -fsSL <仓库 raw 地址>/workbuddy/install.sh -o install.sh && chmod +x install.sh && ./install.sh <url> <key>
 #
 #  环境变量（优先级低于命令行参数）：WB_FIREWALL_URL / WB_FIREWALL_AUTH_KEY
+#  WB_FIREWALL_PKG_URL 可覆盖整包下载地址（默认 GitHub workbuddy 分支归档，调试/镜像用）
 # ============================================================
 
 set -uo pipefail
 
 PLUGIN_ID="wb-firewall-guard"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HELPER="${ROOT}/dist/install-helper.mjs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 引导下载：脚本旁边没有 dist/ 时从这个地址拉整包（WB_FIREWALL_PKG_URL 可覆盖）
+DEFAULT_PKG_URL="https://github.com/nideyeye/tomzang_plungin/archive/refs/heads/workbuddy.tar.gz"
+PACKAGE_URL="${WB_FIREWALL_PKG_URL:-${DEFAULT_PKG_URL}}"
+PKG_DIR="${SCRIPT_DIR}/wb-firewall-guard-pkg"
+ROOT=""   # 安装包根目录：脚本所在目录本身，或引导下载的解压目录，由完整性检测决定
 TARGET="${HOME}/.workbuddy/plugins/${PLUGIN_ID}"
 SETTINGS="${HOME}/.workbuddy/settings.json"
 
@@ -29,6 +37,38 @@ SETTINGS="${HOME}/.workbuddy/settings.json"
 log()  { printf '[%s] [INFO]  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 warn() { printf '[%s] [WARN]  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 err()  { printf '[%s] [ERROR] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
+
+# -------- 安装包完整性：单文件运行时自动从 GitHub 引导下载整包 --------
+pkg_complete() {
+  [[ -f "$1/dist/install-helper.mjs" && -f "$1/dist/guard.mjs" \
+     && -f "$1/dist/firewall.mjs" && -f "$1/dist/extract.mjs" \
+     && -f "$1/config.example.json" ]]
+}
+
+bootstrap_package() {
+  log "安装包不完整，正在从 GitHub 下载整包: ${PACKAGE_URL}"
+  local archive
+  archive="$(mktemp "${TMPDIR:-/tmp}/wbfg-pkg.XXXXXX")" || return 1
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 15 --max-time 300 "${PACKAGE_URL}" -o "${archive}" || { err "下载失败（curl）"; rm -f "${archive}"; return 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --timeout=30 "${PACKAGE_URL}" -O "${archive}" || { err "下载失败（wget）"; rm -f "${archive}"; return 1; }
+  else
+    err "未找到 curl / wget，无法下载安装包"
+    rm -f "${archive}"
+    return 1
+  fi
+  # 下载成功后才清掉旧缓存目录，下载失败时旧包还在，可作离线兜底
+  rm -rf "${PKG_DIR}"
+  mkdir -p "${PKG_DIR}" || { rm -f "${archive}"; return 1; }
+  if ! tar xzf "${archive}" -C "${PKG_DIR}"; then
+    err "解压安装包失败"
+    rm -f "${archive}"
+    return 1
+  fi
+  rm -f "${archive}"
+  return 0
+}
 
 usage() {
   cat <<EOF
@@ -94,6 +134,29 @@ if [[ -z "${NODE_BIN}" ]]; then
   exit 2
 fi
 log "node = ${NODE_BIN} ($("${NODE_BIN}" --version 2>/dev/null))"
+
+# -------- 解析安装包根目录：完整则就地安装，否则引导下载 --------
+if pkg_complete "${SCRIPT_DIR}"; then
+  ROOT="${SCRIPT_DIR}"
+else
+  BOOTSTRAP_OK=1
+  bootstrap_package || BOOTSTRAP_OK=0
+  if pkg_complete "${PKG_DIR}"; then
+    ROOT="${PKG_DIR}"
+  else
+    # GitHub 归档会多一层 <repo>-<branch> 目录
+    for d in "${PKG_DIR}"/*/; do
+      if pkg_complete "${d}"; then ROOT="${d%/}"; break; fi
+    done
+  fi
+  if [[ -z "${ROOT}" ]]; then
+    err "无法获得完整安装包：当前目录不完整，GitHub 下载/解压失败，且本地无可用缓存"
+    exit 2
+  fi
+  [[ "${BOOTSTRAP_OK}" -eq 1 ]] || warn "下载失败，改用本地已缓存的安装包: ${ROOT}"
+fi
+HELPER="${ROOT}/dist/install-helper.mjs"
+log "安装包目录: ${ROOT}"
 
 if [[ ! -f "${HELPER}" ]]; then
   err "找不到安装内核: ${HELPER}（安装包不完整）"
