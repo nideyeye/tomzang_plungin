@@ -100,6 +100,7 @@ if (-not $NodeBin) {
 }
 $nodeVersion = (& $NodeBin --version 2>$null)
 Write-Log "node = $NodeBin ($nodeVersion)"
+Write-Log "安装脚本版本: v3 (2026-10-19)"
 
 # -------- 安装包完整性：单文件运行时自动从 GitHub 引导下载整包 --------
 function Test-PackageComplete([string]$Dir) {
@@ -114,7 +115,8 @@ if (Test-PackageComplete $ScriptDir) {
     $Root = $ScriptDir
 } else {
     $bootstrapOk = $true
-    $tmpArchive = Join-Path ([System.IO.Path]::GetTempPath()) "wbfg-pkg.download"
+    # 临时文件必须以 .zip 结尾：PS 5.1 的 Expand-Archive 按后缀校验，非 .zip 直接拒绝
+    $tmpArchive = Join-Path ([System.IO.Path]::GetTempPath()) "wbfg-pkg.zip"
     # Windows PowerShell 5.1 默认不启用 TLS 1.2，GitHub / 镜像站都要求
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
     $downloaded = $false

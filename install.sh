@@ -149,6 +149,7 @@ if [[ -z "${NODE_BIN}" ]]; then
   exit 2
 fi
 log "node = ${NODE_BIN} ($("${NODE_BIN}" --version 2>/dev/null))"
+log "安装脚本版本: v3 (2026-10-19)"
 
 # -------- 解析安装包根目录：完整则就地安装，否则引导下载 --------
 if pkg_complete "${SCRIPT_DIR}"; then
