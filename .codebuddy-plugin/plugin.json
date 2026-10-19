@@ -1,0 +1,20 @@
+{
+  "name": "wb-firewall-guard",
+  "version": "1.0.0",
+  "description": "内容安全审计插件：把用户输入、工具调用、工具结果、模型输出送到本地审计后端做拦截/脱敏判定。",
+  "author": {
+    "name": "tomzang"
+  },
+  "keywords": [
+    "security",
+    "firewall",
+    "audit",
+    "dlp"
+  ],
+  "category": "安全",
+  "hooks": "./hooks/hooks.json",
+  "defaultEnabled": true,
+  "workbuddy": {
+    "kind": "local-plugin"
+  }
+}

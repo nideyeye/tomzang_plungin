@@ -1,0 +1,17 @@
+{
+  "firewallUrl": "http://${防火墙服务地址}/",
+  "authKey": "${页面上生成的 key}",
+  "blockTip": "抱歉，我无法执行该请求。作为智能助手，我会在我的设定范围内提供帮助。如果你有合法的需求，请正常描述，我会尽力协助。",
+  "blockMessage": "当前请求包含敏感关键字，已被安全组件拦截",
+  "timeout": 3000,
+  "debug": false,
+  "enabled": true,
+  "toolWhitelist": ["WebSearch", "WebFetch", "Glob", "Grep", "TodoWrite", "TaskCreate", "TaskGet", "TaskUpdate", "TaskList"],
+  "note": "Read 不放行白名单，否则 SKILL.md 正文审计会被跳过；Bash/Write/Edit/Skill/mcp__* 全部送审。切回本地 mock：WB_FIREWALL_URL=http://127.0.0.1:8790",
+  "auditToolResult": true,
+  "auditOutput": true,
+  "onMaskedInput": "log",
+  "onMaskedOutput": "log",
+  "onBlockedOutput": "block",
+  "outputAuditIncludesPrompt": false
+}
