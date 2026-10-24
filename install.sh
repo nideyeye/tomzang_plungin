@@ -85,6 +85,12 @@ install_via_openclaw() {
     return 1
   fi
   log "尝试通过 openclaw CLI 安装: openclaw plugins install ${CLAWHUB_REF}"
+  # openclaw 2026.9+ 对声明 capability 的插件要求 --accept-capabilities 才能安装;
+  # 旧版本 CLI 不识别该选项会直接报错, 因此先带参数尝试、失败再回退不带参数
+  if openclaw plugins install "${CLAWHUB_REF}" --accept-capabilities; then
+    log "openclaw CLI 安装成功"
+    return 0
+  fi
   if openclaw plugins install "${CLAWHUB_REF}"; then
     log "openclaw CLI 安装成功"
     return 0
@@ -341,7 +347,7 @@ write_config_file() {
       if (process.env.BLOCK_TIP && process.env.BLOCK_TIP.length > 0) {
         entry.config.blockTip = process.env.BLOCK_TIP;
       }
-      entry.config.debug = process.env.DEBUG_VAL;
+      entry.config.debug = process.env.DEBUG_VAL === "true";
       cfg.plugins.entries[pid] = entry;
 
       // 2. 写入 allowlist (plugins.allow), 这是消除 "not in allowlist" 警告的关键
@@ -351,12 +357,20 @@ write_config_file() {
       }
 
       // 3. 写入 load.paths, 让 OpenClaw 能扫描到该插件目录
+      //    注意: openclaw 的配置校验要求 load.paths 中的路径真实存在。
+      //    全新机器首次安装时插件目录尚未创建，此时若写入该路径，
+      //    Step 1 的 clawhub 渠道会因配置校验失败而死锁，只能依赖
+      //    GitHub 回退渠道（部分网络环境不可达），安装整体失败。
+      //    因此目录不存在时先剔除旧条目、不写入，待安装完成后再由
+      //    Step 3 无条件补写。
       cfg.plugins.load = cfg.plugins.load || {};
-      cfg.plugins.load.paths = Array.isArray(cfg.plugins.load.paths) ? cfg.plugins.load.paths : [];
-      if (!cfg.plugins.load.paths.includes(pathRel) &&
-          !cfg.plugins.load.paths.includes(pluginDir)) {
-        cfg.plugins.load.paths.push(pathRel);
+      const loadPaths = Array.isArray(cfg.plugins.load.paths)
+        ? cfg.plugins.load.paths.filter((p) => p !== pluginDir && p !== pathRel)
+        : [];
+      if (fs.existsSync(pluginDir) && !loadPaths.includes(pathRel) && !loadPaths.includes(pluginDir)) {
+        loadPaths.push(pathRel);
       }
+      cfg.plugins.load.paths = loadPaths;
 
       fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
     '
@@ -377,7 +391,7 @@ write_config_file() {
         "config": {
           "firewallUrl": "${FIREWALL_URL}",
           "authKey": "${AUTH_KEY}"$( [[ -n "${BLOCK_MESSAGE}" ]] && printf ',\n          "blockMessage": "%s"' "${BLOCK_MESSAGE}" )$( [[ -n "${BLOCK_TIP}" ]] && printf ',\n          "blockTip": "%s"' "${BLOCK_TIP}" ),
-          "debug": "${DEBUG_VAL}"
+          "debug": ${DEBUG_VAL}
         }
       }
     }
@@ -422,6 +436,13 @@ restart_gateway() {
     done <"${restart_log}"
   else
     err "  (无输出)"
+  fi
+  # openclaw 2026.9+ 在无 systemd/launchd 服务管理的环境(如容器)中,
+  # gateway restart 会返回非零并提示 "Gateway service disabled";
+  # 此时安装与设备注册均已完成, 网关只需改为前台运行, 不应判定为安装失败
+  if grep -q "Gateway service disabled" "${restart_log}" 2>/dev/null; then
+    warn "检测到 Gateway 服务未安装(容器/无 systemd 环境), 跳过自动重启; 请以前台方式运行: openclaw gateway"
+    return 0
   fi
   err "请稍后手动执行: openclaw gateway restart"
   print_backup_hint
@@ -736,10 +757,9 @@ main() {
     install_ok=1
   fi
 
-  # Step 3: 确保配置正确写入（CLI 安装可能会覆盖配置）
-  if [[ "${config_done_by_cli}" -ne 1 ]]; then
-    write_config_file
-  fi
+  # Step 3: 安装完成后无条件补写配置（插件目录已就绪，确保 load.paths 写入；
+  # CLI 渠道可能已写入部分配置，此处合并写入是幂等的）
+  write_config_file
 
   # Step 4: 兜底校验, 确保插件已加入 allowlist (避免 "not in allowlist" 警告导致禁用)
   if ! verify_in_allowlist; then
