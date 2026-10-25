@@ -1,6 +1,6 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-10-02";
+var PLUGIN_VERSION = "v2026-10-24";
 var fs = require("fs");
 var os = require("os");
 var crypto = require("crypto");

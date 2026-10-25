@@ -78,68 +78,6 @@ if command -v openclaw >/dev/null 2>&1; then
   HAS_OPENCLAW=1
 fi
 
-# -------- 方式 1: 通过 openclaw CLI 安装 --------
-install_via_openclaw() {
-  if [[ "${HAS_OPENCLAW}" -ne 1 ]]; then
-    warn "未检测到 openclaw 命令, 跳过 CLI 安装"
-    return 1
-  fi
-  log "尝试通过 openclaw CLI 安装: openclaw plugins install ${CLAWHUB_REF}"
-  # openclaw 2026.9+ 对声明 capability 的插件要求 --accept-capabilities 才能安装;
-  # 旧版本 CLI 不识别该选项会直接报错, 因此先带参数尝试、失败再回退不带参数
-  if openclaw plugins install "${CLAWHUB_REF}" --accept-capabilities; then
-    log "openclaw CLI 安装成功"
-    return 0
-  fi
-  if openclaw plugins install "${CLAWHUB_REF}"; then
-    log "openclaw CLI 安装成功"
-    return 0
-  fi
-  warn "openclaw CLI 安装失败"
-  return 1
-}
-
-# -------- 方式 1 的配置: 通过 openclaw CLI 写配置 --------
-config_via_openclaw() {
-  if [[ "${HAS_OPENCLAW}" -ne 1 ]]; then
-    return 1
-  fi
-  log "尝试通过 openclaw CLI 写入配置"
-
-  local ok=1
-  # 依次设置必填/可选项, 任一失败即视为 CLI 配置不可用
-  if ! openclaw plugins config "${PLUGIN_ID}" "firewallUrl=${FIREWALL_URL}" >/dev/null 2>&1; then
-    ok=0
-  fi
-  if [[ "${ok}" -eq 1 ]] && \
-     ! openclaw plugins config "${PLUGIN_ID}" "authKey=${AUTH_KEY}" >/dev/null 2>&1; then
-    ok=0
-  fi
-  if [[ "${ok}" -eq 1 && -n "${BLOCK_MESSAGE}" ]] && \
-     ! openclaw plugins config "${PLUGIN_ID}" "blockMessage=${BLOCK_MESSAGE}" >/dev/null 2>&1; then
-    ok=0
-  fi
-  if [[ "${ok}" -eq 1 && -n "${BLOCK_TIP}" ]] && \
-     ! openclaw plugins config "${PLUGIN_ID}" "blockTip=${BLOCK_TIP}" >/dev/null 2>&1; then
-    ok=0
-  fi
-  if [[ "${ok}" -eq 1 ]] && \
-     ! openclaw plugins config "${PLUGIN_ID}" "debug=${DEBUG_VAL}" >/dev/null 2>&1; then
-    ok=0
-  fi
-
-  if [[ "${ok}" -eq 1 ]]; then
-    # 尝试启用 / 加入 allowlist (CLI 子命令命名因版本而异, 失败均不影响主流程)
-    openclaw plugins enable "${PLUGIN_ID}" >/dev/null 2>&1 || true
-    openclaw plugins allow  "${PLUGIN_ID}" >/dev/null 2>&1 || true
-    openclaw plugins allowlist add "${PLUGIN_ID}" >/dev/null 2>&1 || true
-    log "openclaw CLI 配置写入成功"
-    return 0
-  fi
-  warn "openclaw CLI 配置写入失败, 将回退为直接写 ${CONFIG_FILE}"
-  return 1
-}
-
 # -------- 校验插件是否已进入 allowlist; 未进入则返回 1 --------
 verify_in_allowlist() {
   if ! command -v node >/dev/null 2>&1; then
@@ -238,7 +176,8 @@ download_from_github() {
   esac
   archive="${dst}/release.${ext}"
 
-  local dl_args=(-fsSL --connect-timeout 10 --max-time 300 -o "${archive}")
+  # GitHub 为唯一安装渠道, 网络抖动时自动重试（含代理场景下的偶发 SSL/HTTP2 断流）
+  local dl_args=(-fsSL --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 -o "${archive}")
   if [[ -n "${GITHUB_TOKEN}" ]]; then
     dl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
@@ -357,12 +296,10 @@ write_config_file() {
       }
 
       // 3. 写入 load.paths, 让 OpenClaw 能扫描到该插件目录
-      //    注意: openclaw 的配置校验要求 load.paths 中的路径真实存在。
-      //    全新机器首次安装时插件目录尚未创建，此时若写入该路径，
-      //    Step 1 的 clawhub 渠道会因配置校验失败而死锁，只能依赖
-      //    GitHub 回退渠道（部分网络环境不可达），安装整体失败。
-      //    因此目录不存在时先剔除旧条目、不写入，待安装完成后再由
-      //    Step 3 无条件补写。
+      //    注意: openclaw 的配置校验要求 load.paths 中的路径真实存在,
+      //    目录不存在时写入会导致 openclaw CLI 各命令因配置校验失败而不可用。
+      //    因此目录不存在时先剔除旧条目、不写入, 待插件文件部署完成后
+      //    再由主流程补写（防御性设计, 正常时序下写入时目录已就绪）。
       cfg.plugins.load = cfg.plugins.load || {};
       const loadPaths = Array.isArray(cfg.plugins.load.paths)
         ? cfg.plugins.load.paths.filter((p) => p !== pluginDir && p !== pathRel)
@@ -729,39 +666,19 @@ main() {
 
   log "开始安装 ${PLUGIN_ID}"
   log "目标目录: ${PLUGIN_DIR}"
+  log "安装渠道: GitHub Release (唯一渠道)"
 
-  local install_ok=0
-  local config_done_by_cli=0
-
-  # Step 0: 先写入配置文件（因为 openclaw plugins install 会验证 required 字段）
-  # 这样可以避免安装时因缺少必填配置而失败
-  log "预写入配置以通过安装验证"
-  write_config_file
-
-  # Step 1: 优先使用 openclaw CLI 安装
-  if install_via_openclaw; then
-    install_ok=1
-    # 安装成功后, 尝试用 CLI 更新配置（可能已有额外配置）
-    if config_via_openclaw; then
-      config_done_by_cli=1
-    fi
+  # Step 1: 从 GitHub Release 下载并部署
+  # （clawhub 渠道已按需求移除, 仅保留 GitHub; 需要网络可达 github.com）
+  if ! install_via_github; then
+    err "GitHub Release 下载失败, 安装中止"
+    exit 3
   fi
 
-  # Step 2: CLI 路径失败则回退到 GitHub
-  if [[ "${install_ok}" -ne 1 ]]; then
-    warn "openclaw CLI 安装不可用, 回退到 GitHub 方案"
-    if ! install_via_github; then
-      err "所有安装渠道均失败, 安装中止"
-      exit 3
-    fi
-    install_ok=1
-  fi
-
-  # Step 3: 安装完成后无条件补写配置（插件目录已就绪，确保 load.paths 写入；
-  # CLI 渠道可能已写入部分配置，此处合并写入是幂等的）
+  # Step 2: 部署完成后写入配置（此时插件目录已就绪, load.paths 可安全写入）
   write_config_file
 
-  # Step 4: 兜底校验, 确保插件已加入 allowlist (避免 "not in allowlist" 警告导致禁用)
+  # Step 3: 兜底校验, 确保插件已加入 allowlist (避免 "not in allowlist" 警告导致禁用)
   if ! verify_in_allowlist; then
     warn "插件尚未出现在 plugins.allow 中, 进行兜底补写"
     write_config_file
@@ -769,7 +686,7 @@ main() {
 
   log "${PLUGIN_ID} 安装完成"
 
-  # Step 5: 设备注册 (配置了防火墙时必须成功才能继续, 失败则中止安装)
+  # Step 4: 设备注册 (配置了防火墙时必须成功才能继续, 失败则中止安装)
   if [[ -n "${FIREWALL_URL}" ]] && [[ -n "${AUTH_KEY}" ]]; then
     if ! register_device; then
       print_backup_hint
@@ -779,7 +696,7 @@ main() {
     warn "未配置 firewall-url 和 auth-key, 跳过设备注册"
   fi
 
-  # Step 6: 自动重启 gateway 以使配置生效, 失败时输出日志与备份路径
+  # Step 5: 自动重启 gateway 以使配置生效, 失败时输出日志与备份路径
   if ! restart_gateway; then
     exit 4
   fi
