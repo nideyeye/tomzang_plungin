@@ -1,1 +1,6 @@
 DEVICE_ID.md
+
+# 内部研究文档与测试证据（公开仓库不入库）
+RESEARCH_AUDIT_HOOKS.md
+test-gate-probe/results/
+verify-migration/results/

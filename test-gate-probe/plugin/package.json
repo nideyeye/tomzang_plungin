@@ -1,0 +1,23 @@
+{
+  "name": "gate-probe",
+  "version": "0.1.0",
+  "description": "OpenClaw official hook behavior probe (research-audit branch only, never ship).",
+  "license": "Apache-2.0",
+  "private": true,
+  "files": [
+    "index.js",
+    "openclaw.plugin.json",
+    "package.json"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.9"
+    },
+    "build": {
+      "openclawVersion": "2026.4.9"
+    }
+  }
+}

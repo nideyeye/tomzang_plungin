@@ -9,6 +9,9 @@
     "hooks": [
       "before_prompt_build",
       "before_agent_start",
+      "before_agent_run",
+      "llm_input",
+      "llm_output",
       "session_start",
       "session_end",
       "before_tool_call",

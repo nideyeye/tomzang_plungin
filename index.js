@@ -1,6 +1,6 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-10-24";
+var PLUGIN_VERSION = "v2026-10-28";
 var fs = require("fs");
 var os = require("os");
 var crypto = require("crypto");
@@ -233,9 +233,9 @@ function getDeviceId() {
 
 var firewallCallId = 0;
 
-async function callFirewallApi(fetchFn, config, prompt, response, sessionId, stage, source) {
+async function callFirewallApi(fetchFn, config, prompt, response, sessionId, stage, source, traceOverride) {
   var callId = ++firewallCallId;
-  var traceId = "trace-" + Date.now() + "-" + callId;
+  var traceId = traceOverride || ("trace-" + Date.now() + "-" + callId);
   var requestBody = {
     auth_key: config.authKey,
     session_id: sessionId || "session-openclaw",
@@ -1152,8 +1152,9 @@ async function auditNonStreamingResponse(originalFetch, config, resp, userPrompt
   });
 
   var fwResult = await callFirewallApi(
-    originalFetch, config, userPrompt, assistantText, sessionId, "output", "text"
+    originalFetch, config, userPrompt, assistantText, sessionId, "output", "text", currentReportingTraceId()
   );
+  lastOutputReportAt = Date.now();
 
   // 情况1：完全拦截
   if (fwResult.result === "block") {
@@ -1264,8 +1265,9 @@ async function auditStreamingResponse(originalFetch, config, resp, userPrompt, s
   });
 
   var fwResult = await callFirewallApi(
-    originalFetch, config, userPrompt, assistantText, sessionId, "output", "text"
+    originalFetch, config, userPrompt, assistantText, sessionId, "output", "text", currentReportingTraceId()
   );
+  lastOutputReportAt = Date.now();
 
   // 情况1：完全拦截
   if (fwResult.result === "block") {
@@ -1549,6 +1551,136 @@ var plugin = {
       console.log("[tomzang_plungin] [hook] session_end agentId=" + ctx.agentId);
     });
 
+    // ─── 官方输入门（before_agent_run Gate）：输入审计主通道 + 阻断 ───
+    // 语义注意：Gate 型钩子在 handler 抛错/超时会阻断整个回合（fail-closed），
+    // 而本插件策略是 fail-open —— handler 必须全量捕获异常，异常路径显式放行。
+    api.on("before_agent_run", async function (event, ctx) {
+      rememberRunIdentity(ctx.sessionId, ctx.runId);
+      officialInputChannelAt = Date.now();
+
+      var promptText = String(event.prompt || "");
+      if (!promptText || shouldSkipFirewall(promptText)) {
+        logDebug("gate", "input_gate_skipped", {
+          sessionId: ctx.sessionId,
+          reason: !promptText ? "prompt_empty" : "skip_rule"
+        });
+        return; // 放行
+      }
+
+      try {
+        // Gate 钩子默认 15s 超时且超时按 fail-closed 处理（阻断回合），
+        // 防火墙调用超时必须留出安全余量，上限 10s
+        var gateConfig = Object.assign({}, globalConfig, {
+          timeout: Math.min(Number(globalConfig.timeout) || 3000, 10000)
+        });
+        var gateResult = await callFirewallApi(
+          globalOriginalFetch,
+          gateConfig,
+          promptText,
+          "",
+          ctx.sessionId || "session-openclaw",
+          "input",
+          "text",
+          ctx.runId ? "run-" + ctx.runId : null
+        );
+        lastInputReportAt = Date.now();
+        logDebug("gate", "input_gate_result", {
+          sessionId: ctx.sessionId,
+          runId: ctx.runId,
+          action: gateResult.action,
+          result: gateResult.result,
+          riskLevel: gateResult.riskLevel
+        });
+        if (gateResult.result === "block" || gateResult.action === "block") {
+          logInfo("gate", "input_blocked", {
+            sessionId: ctx.sessionId,
+            runId: ctx.runId,
+            violationReason: gateResult.violationReason,
+            riskLevel: gateResult.riskLevel
+          });
+          return {
+            outcome: "block",
+            reason: "firewall_input_block",
+            message: resolveBlockTip(globalConfig)
+          };
+        }
+      } catch (e) {
+        // fail-open：callFirewallApi 内部已 fail-open，此处兜底防止编程异常导致整回合被 Gate 阻断
+        logError("gate", "input_gate_error_failopen", { error: String(e && e.message || e) });
+      }
+      // 未返回 block 即放行
+    });
+
+    // ─── llm_input / llm_output 兜底观测（官方观测钩子，带真实 sessionId/runId）───
+    // 覆盖 fetch 拦截层够不到的路径（如 2026.9 模型通道变更、非 HTTP 传输）；
+    // 近期已有同阶段上报（Gate / fetch 层）时跳过，避免同回合重复上报。
+    api.on("llm_input", async function (event, ctx) {
+      rememberRunIdentity(event.sessionId, event.runId);
+      officialInputChannelAt = Date.now();
+
+      if (Date.now() - lastInputReportAt < FALLBACK_HOOK_TTL_MS) {
+        logDebug("observe", "llm_input_dedup_skip", { sessionId: event.sessionId, runId: event.runId });
+        return;
+      }
+      var promptText = String(event.prompt || "");
+      if (!promptText || shouldSkipFirewall(promptText)) return;
+
+      try {
+        var fwInputResult = await callFirewallApi(
+          globalOriginalFetch,
+          globalConfig,
+          promptText,
+          "",
+          event.sessionId || "session-openclaw",
+          "input",
+          "text",
+          event.runId ? "run-" + event.runId : null
+        );
+        lastInputReportAt = Date.now();
+        logDebug("observe", "llm_input_reported", {
+          sessionId: event.sessionId,
+          runId: event.runId,
+          action: fwInputResult.action,
+          via: "official_hook_fallback"
+        });
+      } catch (e) {
+        logError("observe", "llm_input_report_error", { error: String(e && e.message || e) });
+      }
+    });
+
+    api.on("llm_output", async function (event, ctx) {
+      if (Date.now() - lastOutputReportAt < FALLBACK_HOOK_TTL_MS) {
+        logDebug("observe", "llm_output_dedup_skip", { sessionId: event.sessionId, runId: event.runId });
+        return;
+      }
+      var assistantText = (event.assistantTexts || []).join("\n");
+      var originPrompt = String(event.prompt || "");
+      if (!assistantText) return;
+      if (originPrompt && shouldSkipFirewall(originPrompt)) return;
+
+      try {
+        var fwOutputResult = await callFirewallApi(
+          globalOriginalFetch,
+          globalConfig,
+          originPrompt,
+          assistantText,
+          event.sessionId || "session-openclaw",
+          "output",
+          "text",
+          event.runId ? "run-" + event.runId : null
+        );
+        lastOutputReportAt = Date.now();
+        logDebug("observe", "llm_output_reported", {
+          sessionId: event.sessionId,
+          runId: event.runId,
+          action: fwOutputResult.action,
+          via: "official_hook_fallback"
+        });
+      } catch (e) {
+        logError("observe", "llm_output_report_error", { error: String(e && e.message || e) });
+      }
+    });
+
     // ─── 工具调用钩子 ───
     api.on("before_tool_call", async function (event, ctx) {
       console.log("[tomzang_plungin] [tool] before_call toolName=" + ctx.toolName);
@@ -1579,9 +1711,10 @@ var plugin = {
             globalConfig,
             JSON.stringify([{ path: "SKILL.md", content: skillContent }]),  // skill 正文序列化为文档数组字符串 → content.prompt
             "",
-            "session-openclaw",
+            ctx.sessionId || "session-openclaw",
             "input",
-            "skill"              // source 字段
+            "skill",             // source 字段
+            ctx.runId ? "run-" + ctx.runId : null
           );
           logDebug("skill", "firewall_skill_check_result", {
             toolName: event.toolName,
@@ -1646,9 +1779,10 @@ var plugin = {
         globalConfig,
         paramsText,
         "",
-        "session-openclaw",
+        ctx.sessionId || "session-openclaw",
         "input",
-        "tool_call"
+        "tool_call",
+        ctx.runId ? "run-" + ctx.runId : null
       );
 
       logDebug("tool", "firewall_tool_guard_check_result", {
@@ -1771,7 +1905,8 @@ var plugin = {
           resultText,                                   // 执行结果 → content.response
           ctx.sessionId || "session-openclaw",
           "output",
-          "tool_result"                                 // source 字段
+          "tool_result",                                // source 字段
+          ctx.runId ? "run-" + ctx.runId : null
         );
 
         logDebug("tool", "firewall_tool_result_check_result", {
@@ -1823,6 +1958,39 @@ var undiciInterceptorInstalled = false;
 var globalApi = null;  // 保存 api 实例用于访问配置
 var interceptorInstalled = false;
 var fetchCallId = 0;
+
+// ─── 官方钩子通道状态（审计主通道 / fetch 兜底 去重协调）───
+// 官方钩子（before_agent_run / llm_input / llm_output）带真实 sessionId/runId，
+// fetch 拦截层没有会话上下文。协调规则（保证每回合每个阶段恰好一次防火墙上报）：
+//   - 输入：before_agent_run Gate 为主通道（审计+阻断）；官方通道新鲜时 fetch 层跳过输入审计；
+//     llm_input 仅在近期无任何输入上报时兜底（覆盖 Gate 缺席且 fetch 失效的路径）
+//   - 输出：阻断必须留在 fetch 层（观测钩子不可改写），fetch 层决策调用即上报（借用 lastSessionId）；
+//     llm_output 仅在 fetch 层近期未审计时兜底上报
+// 已知局限：gateway 多会话并发时全局单值可能串会话（当前部署形态以单会话为主，可接受，文档已记）
+var OFFICIAL_CHANNEL_TTL_MS = 30000;   // 官方通道新鲜期
+var FALLBACK_HOOK_TTL_MS = 10000;      // "近期已上报"窗口（兜底钩子判断用）
+var officialInputChannelAt = 0;        // 最近一次 before_agent_run / llm_input 触发时间
+var lastInputReportAt = 0;             // 最近一次输入审计实际上报时间（任意通道）
+var lastOutputReportAt = 0;            // 最近一次输出审计实际上报时间（任意通道）
+var lastSessionId = "";                // 最近一次官方钩子提供的 sessionId
+var lastRunId = "";                    // 最近一次官方钩子提供的 runId
+
+function officialInputChannelFresh() {
+  return Date.now() - officialInputChannelAt < OFFICIAL_CHANNEL_TTL_MS;
+}
+
+function rememberRunIdentity(sessionId, runId) {
+  if (sessionId) lastSessionId = String(sessionId);
+  if (runId) lastRunId = String(runId);
+}
+
+function currentReportingSessionId() {
+  return lastSessionId || "session-openclaw";
+}
+
+function currentReportingTraceId() {
+  return lastRunId ? "run-" + lastRunId : null;
+}
 
 // ─── 全局 fetch 包装函数 ───
 // 这个函数在模块加载时立即调用，确保在 provider 初始化之前完成包装
@@ -1904,10 +2072,12 @@ function installGlobalFetchInterceptor() {
       console.log("[tomzang_plungin] [llm] [firewall_skipped] callId=" + callId + " reason=" + skipReason);
     }
 
-    if (userPrompt && !shouldSkipFirewall(userPrompt)) {
-      console.log("[tomzang_plungin] [llm] [firewall_check_start] callId=" + callId);
+    // 官方输入门（before_agent_run）新鲜时由其负责输入审计/阻断，fetch 层跳过避免重复上报
+    if (userPrompt && !shouldSkipFirewall(userPrompt) && !officialInputChannelFresh()) {
+      console.log("[tomzang_plungin] [llm] [firewall_check_start] callId=" + callId + " (via fetch fallback)");
       try {
-        var fwResult = await callFirewallApi(globalOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input", "text");
+        var fwResult = await callFirewallApi(globalOriginalFetch, globalConfig, userPrompt, "", currentReportingSessionId(), "input", "text", currentReportingTraceId());
+        lastInputReportAt = Date.now();
         console.log("[tomzang_plungin] [llm] [firewall_check_result] callId=" + callId + " action=" + fwResult.action + " result=" + fwResult.result);
         if (fwResult.result === "block") {
           var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
@@ -1944,7 +2114,7 @@ function installGlobalFetchInterceptor() {
           globalConfig,
           resp,
           userPrompt,
-          "session-openclaw",
+          currentReportingSessionId(),
           callId,
           url,
           matchedProvider
@@ -2158,10 +2328,11 @@ function tryInstallUndiciInterceptor(undiciPath) {
           console.log("[tomzang_plungin] [undici] [firewall_skipped] callId=" + callId + " reason=" + skipReason);
         }
 
-        if (userPrompt && !shouldSkipFirewall(userPrompt)) {
-          console.log("[tomzang_plungin] [undici] [firewall_check_start] callId=" + callId);
+        if (userPrompt && !shouldSkipFirewall(userPrompt) && !officialInputChannelFresh()) {
+          console.log("[tomzang_plungin] [undici] [firewall_check_start] callId=" + callId + " (via fetch fallback)");
           try {
-            var fwResult = await callFirewallApi(undiciOriginalFetch, globalConfig, userPrompt, "", "session-openclaw", "input", "text");
+            var fwResult = await callFirewallApi(undiciOriginalFetch, globalConfig, userPrompt, "", currentReportingSessionId(), "input", "text", currentReportingTraceId());
+            lastInputReportAt = Date.now();
             console.log("[tomzang_plungin] [undici] [firewall_check_result] callId=" + callId + " action=" + fwResult.action + " result=" + fwResult.result);
             if (fwResult.result === "block") {
               var wantsSse = guessRequestWantsSse(url, reqHeaders, reqBodyText);
@@ -2198,7 +2369,7 @@ function tryInstallUndiciInterceptor(undiciPath) {
               globalConfig,
               resp,
               userPrompt,
-              "session-openclaw",
+              currentReportingSessionId(),
               callId,
               url,
               matchedProvider

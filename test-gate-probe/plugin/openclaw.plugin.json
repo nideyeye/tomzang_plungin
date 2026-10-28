@@ -1,0 +1,24 @@
+{
+  "id": "gate-probe",
+  "name": "gate-probe Plugin",
+  "description": "Official hook behavior probe: before_agent_run block (截断), before_agent_reply handled (代答), llm_input/llm_output observation (会话聚合). Research-only, never ship.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "hooks": [
+      "before_agent_run",
+      "before_agent_reply",
+      "llm_input",
+      "llm_output",
+      "before_agent_finalize",
+      "session_start",
+      "session_end"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
