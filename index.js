@@ -1,6 +1,6 @@
 // ─── 配置解析 ───
 
-var PLUGIN_VERSION = "v2026-10-24";
+var PLUGIN_VERSION = "v2026-11-04";
 var fs = require("fs");
 var os = require("os");
 var crypto = require("crypto");
@@ -799,11 +799,49 @@ function requestBodyToText(body) {
   return "";
 }
 
+// 流式请求体（ReadableStream）只能读一次：tee 分叉后一支用于审计读取，
+// 另一支登记在此，由包装器在透传前回填到 init.body（原流经 tee 后不可复用）
+var TEE_BODY_BRANCH = new WeakMap();
+
 async function getRequestBodyText(input, init) {
   if (input instanceof Request) {
     try { return await input.clone().text(); } catch { return ""; }
   }
-  return requestBodyToText(init && init.body);
+  var body = init && init.body;
+  // openclaw 2026.10+ 模型请求体为 ReadableStream（流式 duplex 请求），
+  // 缓冲式解码拿不到内容会导致审计整体旁路；此处 tee 分叉读取全文
+  if (body && typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+    try {
+      var pair = body.tee();
+      TEE_BODY_BRANCH.set(init, pair[1]);
+      var reader = pair[0].getReader();
+      var chunks = [];
+      while (true) {
+        var r = await reader.read();
+        if (r.done) break;
+        if (r.value) chunks.push(r.value);
+      }
+      var total = 0;
+      for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+      var merged = new Uint8Array(total);
+      var off = 0;
+      for (var j = 0; j < chunks.length; j++) { merged.set(chunks[j], off); off += chunks[j].length; }
+      return new TextDecoder("utf-8").decode(merged);
+    } catch (e) {
+      logDebug("fetch", "stream_body_read_error", { error: String(e && e.message || e) });
+      return "";
+    }
+  }
+  return requestBodyToText(body);
+}
+
+// 包装器在 getRequestBodyText 之后立即调用：若请求体已被 tee，用存活分支回填 init.body，
+// 保证后续所有透传路径（含非 LLM 请求提前放行）都携带完整请求体
+function restoreTeeBodyBranch(init) {
+  try {
+    var branch = init && TEE_BODY_BRANCH.get(init);
+    if (branch) init.body = branch;
+  } catch (e) {}
 }
 
 function headersInitToRecord(headersInit) {
@@ -1848,6 +1886,7 @@ function installGlobalFetchInterceptor() {
     var url = getUrlFromFetchArgs(input);
     var method = getMethodFromFetchArgs(input, init);
     var reqBodyText = await getRequestBodyText(input, init);
+    restoreTeeBodyBranch(init);
 
     // ─── 双重 LLM 检测：provider 匹配 + 智能识别 ───
     var providerUrls = [];
@@ -2103,6 +2142,7 @@ function tryInstallUndiciInterceptor(undiciPath) {
         var url = getUrlFromFetchArgs(input);
         var method = getMethodFromFetchArgs(input, init);
         var reqBodyText = await getRequestBodyText(input, init);
+        restoreTeeBodyBranch(init);
 
         // ─── 双重 LLM 检测：provider 匹配 + 智能识别 ───
         var providerUrls = [];
