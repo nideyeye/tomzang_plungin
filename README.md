@@ -2,7 +2,7 @@
 
 OpenClaw 安全内容检测插件，通过防火墙 API 对用户输入进行实时安全检测和拦截。
 
-> 当前已适配 OpenClaw 最新版本 **2026.11.3**（适配于 2026-11-14，插件版本 v2026-11-14）<!-- AUTOUPDATE:supported-version -->
+> 当前已适配 OpenClaw 最新版本 **2026.11.5**（适配于 2026-11-19，插件版本 v2026-11-19）<!-- AUTOUPDATE:supported-version -->
 
 ## 主要功能
 
