@@ -687,14 +687,16 @@ update_opencode_config() {
     # 使用 jq 添加插件
     if command -v jq &> /dev/null; then
         # 检查插件是否已存在
+        # 注意: 已存在的 opencode.json 可能没有 plugin 键（null），
+        # 直接 .plugin[] 迭代会报错并中止安装，必须先兜底为空数组
         local current_plugins
-        current_plugins=$(jq -r '.plugin[]' "${config_file}")
+        current_plugins=$(jq -r '(.plugin // [])[]' "${config_file}")
 
         if echo "${current_plugins}" | grep -qF "${file_url}"; then
             info "插件已在配置中"
         else
             local new_config
-            new_config=$(jq --arg plugin "${file_url}" '.plugin += [$plugin]' "${config_file}")
+            new_config=$(jq --arg plugin "${file_url}" '.plugin = ((.plugin // []) + [$plugin])' "${config_file}")
             echo "${new_config}" > "${config_file}"
             success "已添加插件到配置文件"
         fi

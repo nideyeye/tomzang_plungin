@@ -2,6 +2,8 @@
 
 OpenCode 插件 — 记录用户输入和工具调用日志，并集成 OpenClaw ToolGuard 防火墙进行安全审计。
 
+> 当前已适配 OpenCode 最新版本 **1.19.6**（适配于 2026-11-19，插件版本 v2026-11-19）<!-- AUTOUPDATE:supported-version -->
+
 ## 功能
 
 - 捕获用户发送的每条消息，输出 `[USER]` 日志

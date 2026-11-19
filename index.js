@@ -2,6 +2,8 @@ import fs from "fs";
 import os from "os";
 import crypto from "crypto";
 import { execSync } from "child_process";
+// 插件版本 = 适配日期（由 autowatch 在新版本适配成功时自动更新）
+var PLUGIN_VERSION = "v2026-11-19";
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感信息，已被安全组件拦截";
 var BLOCK_MARKER = "[TOMZANG_FW_BLOCKED]";
 
