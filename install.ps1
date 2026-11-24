@@ -55,7 +55,7 @@ OpenCode 插件跨平台安装脚本
     .\install.ps1 -Mode global http://firewall-url auth-key
 
     # 一键安装命令
-    irm https://raw.githubusercontent.com/nideyeye/tomzang_plungin/open-code/install.ps1 | iex -- http://firewall-url auth-key
+    irm https://raw.githubusercontent.com/nideyeye/tomzang_plungin/open-code-v2/install.ps1 | iex -- http://firewall-url auth-key
 
 "@ | Write-Host
     exit 0
@@ -78,7 +78,7 @@ function Error-Log($Message) { Write-ColorOutput Red "[ERROR] $Message"; exit 1 
 
 # 远程仓库配置
 $RepoUrl = "https://raw.githubusercontent.com/nideyeye/tomzang_plungin"
-$RepoBranch = $env:REPO_BRANCH ?? "open-code"
+$RepoBranch = $env:REPO_BRANCH ?? "open-code-v2"
 
 # 获取脚本所在目录
 $ScriptDir = Split-Path -Parent $PSScriptRoot
@@ -87,13 +87,12 @@ if (Test-Path variable:global:PSCommandPath) {
 }
 $PluginFile = Join-Path $ScriptDir "index.js"
 
-# OpenCode 配置路径
+# OpenCode 配置路径（V2：插件经 plugins 目录自动发现，无需写 opencode.json）
 if ($IsWindows -or ($null -eq $IsWindows -and $env:OS -eq "Windows_NT")) {
     $OpenCodeConfigDir = Join-Path $env:USERPROFILE ".config" "opencode"
 } else {
     $OpenCodeConfigDir = Join-Path $env:HOME ".config" "opencode"
 }
-$OpenCodeConfigFile = Join-Path $OpenCodeConfigDir "opencode.json"
 $OpenCodePluginsDir = Join-Path $OpenCodeConfigDir "plugins"
 
 # 临时目录
@@ -211,21 +210,20 @@ function Test-PluginFiles {
     Success-Log "必要文件检查通过"
 }
 
-# 构建插件配置 JSON
-function Get-PluginConfig {
-    param([string]$PluginPath = $PluginFile)
+# 写入插件配置文件 config.json（V2：配置与 index.js 同目录，替代 V1 的 opencode.json 声明）
+function Write-PluginConfig {
+    param([string]$TargetDir)
 
     $Config = [ordered]@{
-        package = $PluginPath
-        options = [ordered]@{
-            firewallUrl = $FirewallUrl
-            authKey = $AuthKey
-            blockMessage = $BlockMessage
-            firewallTimeout = $FirewallTimeout
-            debug = $Debug.IsPresent
-        }
+        firewallUrl = $FirewallUrl
+        authKey = $AuthKey
+        blockMessage = $BlockMessage
+        firewallTimeout = $FirewallTimeout
+        debug = $Debug.IsPresent
     }
-    return $Config
+    $ConfigFile = Join-Path $TargetDir "config.json"
+    $Config | ConvertTo-Json | Set-Content $ConfigFile
+    Info-Log "写入配置文件: $ConfigFile"
 }
 
 # 显示配置摘要
@@ -249,11 +247,9 @@ function Show-ConfigSummary {
 "@
 }
 
-# 项目级安装
+# 项目级安装（V2：.opencode/plugins/ 直属插件目录自动发现，无需 opencode.json 声明）
 function Install-ProjectLevel {
     param([string]$ProjectPath)
-
-    $ConfigFile = Join-Path $ProjectPath "opencode.json"
 
     Info-Log "安装到项目: $ProjectPath"
 
@@ -262,105 +258,39 @@ function Install-ProjectLevel {
         Error-Log "项目目录不存在: $ProjectPath"
     }
 
-    # 确定插件路径
-    $PluginPath = $PluginFile
-    $NeedCopy = $false
+    # 始终复制插件文件到自动发现目录（V2 不写 opencode.json，声明本地路径会被当作 npm 包安装而失败）
+    $TargetPluginDir = Join-Path $ProjectPath ".opencode" "plugins" "tomzang_plungin"
+    New-Item -ItemType Directory -Path $TargetPluginDir -Force | Out-Null
 
-    # 如果使用临时文件，复制到项目目录
-    if ($TempDir -and $PluginFile -like "$TempDir*") {
-        $NeedCopy = $true
-        $TargetPluginDir = Join-Path $ProjectPath ".opencode-plugins" "tomzang_plungin"
-        New-Item -ItemType Directory -Path $TargetPluginDir -Force | Out-Null
+    Info-Log "复制插件文件到 $TargetPluginDir"
+    Copy-Item -Path $PluginFile -Destination (Join-Path $TargetPluginDir "index.js") -Force
 
-        Info-Log "复制插件文件到 $TargetPluginDir"
-        Copy-Item -Path $PluginFile -Destination (Join-Path $TargetPluginDir "index.js") -Force
-
-        $PluginPath = (Join-Path $TargetPluginDir "index.js") -replace "\\", "/"
-    } else {
-        # 本地文件路径，转换为正斜杠
-        $PluginPath = $PluginFile -replace "\\", "/"
-    }
-
-    # 创建或更新 opencode.json
-    if (Test-Path $ConfigFile) {
-        Info-Log "已存在配置文件: $ConfigFile"
-        Info-Log "将添加插件配置..."
-        $ExistingConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
-    } else {
-        Info-Log "创建新配置文件: $ConfigFile"
-        $ExistingConfig = @{ plugin = @() }
-    }
-
-    # 添加插件配置
-    if (-not $ExistingConfig.plugin) {
-        $ExistingConfig.plugin = @()
-    }
-
-    # 移除已存在的同名插件
-    $ExistingConfig.plugin = $ExistingConfig.plugin | Where-Object {
-        $_.package -notlike "*tomzang_plungin*"
-    }
-
-    # 添加新配置
-    $PluginConfig = Get-PluginConfig -PluginPath $PluginPath
-    $ExistingConfig.plugin += $PluginConfig
-
-    # 保存配置
-    $ExistingConfig | ConvertTo-Json -Depth 10 | Set-Content $ConfigFile
+    # 写入插件配置（与 index.js 同目录）
+    Write-PluginConfig -TargetDir $TargetPluginDir
 
     Success-Log "项目级安装完成"
-    Info-Log "配置文件: $ConfigFile"
-    if ($NeedCopy) {
-        Info-Log "插件文件已复制到: $PluginPath"
-    }
+    Info-Log "插件目录: $TargetPluginDir"
 }
 
-# 全局级安装
+# 全局级安装（V2：~/.config/opencode/plugins/ 直属插件目录自动发现）
 function Install-GlobalLevel {
     Info-Log "安装到全局: $OpenCodePluginsDir"
 
     # 创建必要的目录
     New-Item -ItemType Directory -Path $OpenCodePluginsDir -Force | Out-Null
 
-    # 复制插件文件
+    # 复制插件文件到自动发现目录
     $TargetPluginDir = Join-Path $OpenCodePluginsDir "tomzang_plungin"
     New-Item -ItemType Directory -Path $TargetPluginDir -Force | Out-Null
 
     Info-Log "复制插件文件到 $TargetPluginDir"
     Copy-Item -Path $PluginFile -Destination (Join-Path $TargetPluginDir "index.js") -Force
 
-    # 创建或更新全局配置
-    if (Test-Path $OpenCodeConfigFile) {
-        Info-Log "已存在全局配置文件"
-        Info-Log "将添加插件配置..."
-        $ExistingConfig = Get-Content $OpenCodeConfigFile -Raw | ConvertFrom-Json
-    } else {
-        Info-Log "创建全局配置文件"
-        New-Item -ItemType Directory -Path $OpenCodeConfigDir -Force | Out-Null
-        $ExistingConfig = @{ plugin = @() }
-    }
-
-    # 添加插件配置
-    if (-not $ExistingConfig.plugin) {
-        $ExistingConfig.plugin = @()
-    }
-
-    # 移除已存在的同名插件
-    $ExistingConfig.plugin = $ExistingConfig.plugin | Where-Object {
-        $_.package -notlike "*tomzang_plungin*"
-    }
-
-    # 添加新配置
-    $PluginPath = (Join-Path $TargetPluginDir "index.js") -replace "\\", "/"
-    $PluginConfig = Get-PluginConfig -PluginPath $PluginPath
-    $ExistingConfig.plugin += $PluginConfig
-
-    # 保存配置
-    $ExistingConfig | ConvertTo-Json -Depth 10 | Set-Content $OpenCodeConfigFile
+    # 写入插件配置（与 index.js 同目录）
+    Write-PluginConfig -TargetDir $TargetPluginDir
 
     Success-Log "全局级安装完成"
     Info-Log "插件目录: $TargetPluginDir"
-    Info-Log "配置文件: $OpenCodeConfigFile"
 }
 
 # 显示摘要

@@ -409,23 +409,22 @@ async function callFirewallApi(config, prompt, response, source, sessionId) {
 // 新增：格式化命中规则表头
 var HIT_RULES_HEADER = "规则代码 | 规则名称 | 风险等级 | 描述 | AIA分类";
 
-// 新增：写入日志到文件
-async function writeLog(logFilePath, message) {
+// 写入日志到文件（串行队列 + appendFile 追加：并发 read-modify-write 会相互覆盖丢行，
+// banner 等批量日志并发写入时尤其明显）
+var logWriteQueue = Promise.resolve();
+function writeLog(logFilePath, message) {
   if (!logFilePath) return;
-  try {
-    var timestamp = new Date().toLocaleString("zh-CN", { hour12: false });
-    var logMessage = "[" + timestamp + "] " + message + "\n";
-    var existingContent = "";
-    try {
-      existingContent = await fs.promises.readFile(logFilePath, "utf-8");
-    } catch (_) {
-      existingContent = "";
-    }
-    await fs.promises.writeFile(logFilePath, existingContent + logMessage, "utf-8");
-  } catch (e) {
-    // 静默失败，避免影响主流程
-    console.error("[tomzang_plungin] 写入日志失败: " + (e.message || e));
-  }
+  logWriteQueue = logWriteQueue
+    .then(function () {
+      var timestamp = new Date().toLocaleString("zh-CN", { hour12: false });
+      var logMessage = "[" + timestamp + "] " + message + "\n";
+      return fs.promises.appendFile(logFilePath, logMessage, "utf-8");
+    })
+    .catch(function (e) {
+      // 静默失败，避免影响主流程
+      console.error("[tomzang_plungin] 写入日志失败: " + (e.message || e));
+    });
+  return logWriteQueue;
 }
 
 // 读取配置文件
@@ -528,15 +527,21 @@ export default {
     }
 
     // V2 服务器插件无 TUI Toast 通道（TUI 属 @opencode/plugin/tui 独立入口），
-    // 拦截通知降级为日志输出
+    // 拦截通知降级为日志输出（信息量与 V1 Toast 对齐：原因 + 风险等级 + 命中规则表）
     async function showBlockToast(fwData, source) {
       log(
-        "[tomzang_plungin] [TOAST-SKIP] 已拦截(" +
+        "[tomzang_plungin] [TOAST-SKIP] 🚨 内容被拦截（" +
           source +
-          "): 风险等级 " +
-          (fwData.risk_level || 0) +
+          "）\n原因: " +
+          (fwData.violation_reason || "未知原因") +
+          "\n风险等级: " +
+          getRiskEmoji(fwData.risk_level || 0) +
           " " +
-          (fwData.violation_reason || "")
+          (fwData.risk_level || 0) +
+          "\n" +
+          HIT_RULES_HEADER +
+          "\n" +
+          formatHitRulesForToast(fwData.hit_rules)
       );
     }
 
@@ -559,11 +564,21 @@ export default {
       }
     }
 
-    // 插件加载日志
+    // 插件加载日志（字段与 V1 banner 对齐；V2 ctx 无 project.id，项目名以工作目录名近似）
+    var projectName =
+      (directory && String(directory).split("/").filter(Boolean).pop()) ||
+      "unknown";
     logForce("[tomzang_plungin] ===== 插件加载（OpenCode V2）=====");
+    logForce("[tomzang_plungin] 项目: " + projectName);
     logForce("[tomzang_plungin] 目录: " + directory);
     logForce("[tomzang_plungin] 防火墙: " + (hasFirewall ? "已启用" : "未配置"));
+    logForce(
+      "[tomzang_plungin] Toast: 不可用（V2 服务器插件无 TUI 通知通道，拦截通知降级为日志）"
+    );
     logForce("[tomzang_plungin] Debug: " + config.debug);
+    logForce(
+      "[tomzang_plungin] 日志文件: " + (config.logFile || "未配置")
+    );
     logForce("[tomzang_plungin] 版本: " + PLUGIN_VERSION);
     if (hasFirewall) {
       logForce("[tomzang_plungin] 防火墙URL: " + config.firewallUrl);
