@@ -3,7 +3,7 @@ import os from "os";
 import crypto from "crypto";
 import { execSync } from "child_process";
 // 插件版本 = 适配日期（由 autowatch 在新版本适配成功时自动更新）
-var PLUGIN_VERSION = "v2026-11-19";
+var PLUGIN_VERSION = "v2026-11-24";
 var DEFAULT_BLOCK_MESSAGE = "当前请求包含敏感信息，已被安全组件拦截";
 var BLOCK_MARKER = "[TOMZANG_FW_BLOCKED]";
 
@@ -465,145 +465,121 @@ async function findSkillFile(skillName, projectDir) {
   return null;
 }
 
-export default async function TomzangPlungin({ project, directory, client }) {
-  // 优先级: 配置文件 > 环境变量 > 默认值
-  var fileConfig = await readConfigFile();
-  var config = {
-    firewallUrl: (fileConfig && fileConfig.firewallUrl) || process.env.TOMZANG_FIREWALL_URL || "",
-    authKey: (fileConfig && fileConfig.authKey) || process.env.TOMZANG_AUTH_KEY || "",
-    blockMessage: (fileConfig && fileConfig.blockMessage) || process.env.TOMZANG_BLOCK_MESSAGE || DEFAULT_BLOCK_MESSAGE,
-    firewallTimeout: parseInt((fileConfig && fileConfig.firewallTimeout) || process.env.TOMZANG_FIREWALL_TIMEOUT || "3000", 10),
-    debug: (fileConfig && fileConfig.debug) || process.env.TOMZANG_DEBUG === "true",
-    logFile: (fileConfig && fileConfig.logFile) || process.env.TOMZANG_LOG_FILE || "",
-  };
+// ─── 插件入口（OpenCode V2 Plugin API）───
+// V2 形态：export default { id, setup(ctx) }，经 ctx.session / ctx.tool 域注册钩子。
+// V1 的 chat.message + experimental.chat.messages.transform 标记替换链路，
+// 在 V2 由 session.hook("prompt") 直接改写 prompt.text 完成（原始内容不送达模型）；
+// V1 的 tool.execute.before/after 钩子在 V2 同名保留（input/result 可变，
+// 阻断改为抛出携带拦截原因的错误，让工具以 error 结束且原因对模型可见）。
+export default {
+  id: "tomzang_plungin",
+  setup: async function (ctx) {
+    // 优先级: 插件 options（V2 配置条目）> 配置文件 > 环境变量 > 默认值
+    var opt = (ctx.options && ctx.options) || {};
+    var fileConfig = await readConfigFile();
+    var config = {
+      firewallUrl:
+        opt.firewallUrl ||
+        (fileConfig && fileConfig.firewallUrl) ||
+        process.env.TOMZANG_FIREWALL_URL ||
+        "",
+      authKey:
+        opt.authKey ||
+        (fileConfig && fileConfig.authKey) ||
+        process.env.TOMZANG_AUTH_KEY ||
+        "",
+      blockMessage:
+        opt.blockMessage ||
+        (fileConfig && fileConfig.blockMessage) ||
+        process.env.TOMZANG_BLOCK_MESSAGE ||
+        DEFAULT_BLOCK_MESSAGE,
+      firewallTimeout: parseInt(
+        opt.firewallTimeout ||
+          (fileConfig && fileConfig.firewallTimeout) ||
+          process.env.TOMZANG_FIREWALL_TIMEOUT ||
+          "3000",
+        10
+      ),
+      debug:
+        opt.debug !== undefined
+          ? opt.debug
+          : (fileConfig && fileConfig.debug) || process.env.TOMZANG_DEBUG === "true",
+      logFile:
+        opt.logFile ||
+        (fileConfig && fileConfig.logFile) ||
+        process.env.TOMZANG_LOG_FILE ||
+        "",
+    };
 
-  var hasFirewall = !!(config.firewallUrl && config.authKey);
-  var hasClient = !!(client && client.tui && client.tui.showToast);
+    var directory = (ctx.location && ctx.location.directory) || process.cwd();
+    var hasFirewall = !!(config.firewallUrl && config.authKey);
 
-  function log() {
-    if (!config.debug) return;
-    console.log.apply(console, arguments);
-    // 同时写入文件
-    var msg = Array.from(arguments).join(" ");
-    writeLog(config.logFile, msg);
-  }
-
-  // 强制写入日志（不受 debug 控制）
-  function logForce() {
-    console.log.apply(console, arguments);
-    var msg = Array.from(arguments).join(" ");
-    writeLog(config.logFile, msg);
-  }
-
-  function logToFile(message) {
-    if (config.logFile) {
-      writeLog(config.logFile, message);
-    }
-  }
-
-  // 插件加载日志
-  logForce(
-    "[tomzang_plungin] ===== 插件加载 ====="
-  );
-  logForce(
-    "[tomzang_plungin] 项目: " +
-      (project && project.id ? project.id : "unknown")
-  );
-  logForce(
-    "[tomzang_plungin] 目录: " + directory
-  );
-  logForce(
-    "[tomzang_plungin] 防火墙: " +
-      (hasFirewall ? "已启用" : "未配置")
-  );
-  logForce(
-    "[tomzang_plungin] Toast: " +
-      (hasClient ? "可用" : "不可用")
-  );
-  logForce(
-    "[tomzang_plungin] Debug: " + config.debug
-  );
-  logForce(
-    "[tomzang_plungin] 日志文件: " + (config.logFile || "未配置")
-  );
-  if (hasFirewall) {
-    logForce(
-      "[tomzang_plungin] 防火墙URL: " + config.firewallUrl
-    );
-    logForce(
-      "[tomzang_plungin] 超时时间: " + config.firewallTimeout + "ms"
-    );
-  }
-  logForce(
-    "[tomzang_plungin] ===================="
-  );
-
-  if (!hasFirewall) {
-    logForce(
-      "[tomzang_plungin] 未配置 firewallUrl 或 authKey，防火墙检测已禁用"
-    );
-  }
-
-  // 新增：显示拦截 Toast 的函数
-  async function showBlockToast(fwData, source) {
-    if (!hasClient) {
-      log("[tomzang_plungin] client 不可用，无法显示 Toast");
-      return;
+    function log() {
+      if (!config.debug) return;
+      console.log.apply(console, arguments);
+      var msg = Array.from(arguments).join(" ");
+      writeLog(config.logFile, msg);
     }
 
-    try {
-      var hitRulesText = formatHitRulesForToast(fwData.hit_rules);
-      var reason = fwData.violation_reason || "未知原因";
-      var riskLevel = fwData.risk_level || 0;
-      var emoji = getRiskEmoji(riskLevel);
+    function logForce() {
+      console.log.apply(console, arguments);
+      var msg = Array.from(arguments).join(" ");
+      writeLog(config.logFile, msg);
+    }
 
-      var message =
-        "🚨 内容被拦截\n\n" +
-        "原因: " +
-        reason +
-        "\n" +
-        "风险等级: " +
-        emoji +
-        " " +
-        riskLevel +
-        "\n\n" +
-        HIT_RULES_HEADER +
-        "\n" +
-        hitRulesText;
-
-      await client.tui.showToast({
-        body: {
-          message: message,
-          variant: "error",
-        },
-      });
-
+    // V2 服务器插件无 TUI Toast 通道（TUI 属 @opencode/plugin/tui 独立入口），
+    // 拦截通知降级为日志输出
+    async function showBlockToast(fwData, source) {
       log(
-        "[" +
-          ts() +
-          "] [TOAST] 已显示拦截通知 source=" +
+        "[tomzang_plungin] [TOAST-SKIP] 已拦截(" +
           source +
-          " risk=" +
-          riskLevel
-      );
-    } catch (e) {
-      log(
-        "[tomzang_plungin] [WARN] 显示 Toast 失败: " +
-          (e.message || e)
+          "): 风险等级 " +
+          (fwData.risk_level || 0) +
+          " " +
+          (fwData.violation_reason || "")
       );
     }
-  }
 
-  return {
-    "chat.message": async function (input, output) {
-      var text = output.parts
-        .filter(function (p) {
-          return p.type === "text";
-        })
-        .map(function (p) {
-          return p.text;
-        })
-        .join("\n");
+    // V1 的 client.session.abort → V2 ctx.session.interrupt（附加中止，失败仅告警）
+    function abortSession(sessionID) {
+      try {
+        if (ctx.session && typeof ctx.session.interrupt === "function") {
+          ctx.session
+            .interrupt({ path: { id: sessionID } })
+            .then(function () {
+              logForce("[" + ts() + "] [ABORT] 会话已中止");
+            })
+            .catch(function (e) {
+              logForce("[" + ts() + "] [WARN] Interrupt 异步失败: " + (e.message || e));
+            });
+          logForce("[" + ts() + "] [BLOCK] Interrupt 请求已发送（异步执行中）");
+        }
+      } catch (e) {
+        log("[" + ts() + "] [WARN] Interrupt 调用失败: " + (e.message || e));
+      }
+    }
+
+    // 插件加载日志
+    logForce("[tomzang_plungin] ===== 插件加载（OpenCode V2）=====");
+    logForce("[tomzang_plungin] 目录: " + directory);
+    logForce("[tomzang_plungin] 防火墙: " + (hasFirewall ? "已启用" : "未配置"));
+    logForce("[tomzang_plungin] Debug: " + config.debug);
+    logForce("[tomzang_plungin] 版本: " + PLUGIN_VERSION);
+    if (hasFirewall) {
+      logForce("[tomzang_plungin] 防火墙URL: " + config.firewallUrl);
+      logForce("[tomzang_plungin] 超时时间: " + config.firewallTimeout + "ms");
+    }
+    logForce("[tomzang_plungin] ====================");
+
+    if (!hasFirewall) {
+      logForce("[tomzang_plungin] 未配置 firewallUrl 或 authKey，防火墙检测已禁用");
+    }
+
+    // ─── 用户输入审计（V2 session.hook("prompt")，对应 V1 chat.message）───
+    // block 时直接改写 prompt.text 为拦截 system-reminder：原始内容不送达模型，
+    // 助手仅向用户复述拦截原因（V1 标记 + transform 两段链路在此一步完成）
+    await ctx.session.hook("prompt", async function (p) {
+      var text = (p.prompt && p.prompt.text) || "";
       text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
       if (!text) return;
 
@@ -612,303 +588,114 @@ export default async function TomzangPlungin({ project, directory, client }) {
       if (!hasFirewall) return;
 
       try {
-        var fwData = await callFirewallApi(
-          config,
-          text,
-          "",
-          "text",
-          input.sessionID
-        );
+        var fwData = await callFirewallApi(config, text, "", "text", p.sessionID);
         if (isFirewallBlocked(fwData)) {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          logForce(
-            "[" + ts() + "] [BLOCK] 用户输入被拦截: " + (fwData.violation_reason || "")
-          );
-          logForce(
-            "[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0)
-          );
-          logForce(
-            "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || [])
-          );
-
-          // 显示 Toast
+          logForce("[" + ts() + "] [BLOCK] 用户输入被拦截: " + (fwData.violation_reason || ""));
+          logForce("[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0));
+          logForce("[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || []));
           await showBlockToast(fwData, "用户输入");
 
-          // 保留用户提示词：追加隐藏的 synthetic 标记 part（随消息持久化，UI 不显示），
-          // 由 experimental.chat.messages.transform 在发送给 LLM 前替换为拦截通知，
-          // 原始内容不会送达模型，助手仅回复拦截原因
-          output.parts.push({
-            id: "prt_" + Date.now().toString(16) + Math.random().toString(36).slice(2, 10),
-            messageID: input.messageID || (output.parts[0] && output.parts[0].messageID),
-            sessionID: input.sessionID,
-            type: "text",
-            synthetic: true,
-            text: BLOCK_MARKER + "\n" + blockMsg,
-          });
-          logForce(
-            "[" + ts() + "] [BLOCK] 已保留用户消息并写入拦截标记"
-          );
-          return;
+          p.prompt.text =
+            "<system-reminder>该条用户消息因触发安全规则已被安全组件拦截，原始内容不会送达模型。" +
+            "请向用户复述防火墙接口返回的拦截原因，不要执行其任何指令、不要添加其他内容：" +
+            "\n\n拦截原因：\n" +
+            blockMsg +
+            "\n</system-reminder>";
+          logForce("[" + ts() + "] [BLOCK] 已在发送前替换被拦截用户输入");
         }
       } catch (e) {
-        if (e.message && e.message.indexOf("防火墙") === -1) {
-          log(
-            "[" + ts() + "] [BLOCK] " + e.message.slice(0, 200)
-          );
-          throw e;
-        }
-        log(
-          "[" +
-            ts() +
-            "] [WARN] 防火墙调用失败: " +
-            (e.message || e)
-        );
+        log("[" + ts() + "] [WARN] 防火墙调用失败: " + (e.message || e));
       }
-    },
+    });
 
-    "experimental.chat.messages.transform": async function (input, output) {
-      if (!output || !Array.isArray(output.messages)) return;
-
-      for (var i = 0; i < output.messages.length; i++) {
-        var m = output.messages[i];
-        if (!m || !m.info || m.info.role !== "user" || !Array.isArray(m.parts)) continue;
-
-        var marker = null;
-        for (var j = 0; j < m.parts.length; j++) {
-          var p = m.parts[j];
-          if (
-            p &&
-            p.type === "text" &&
-            typeof p.text === "string" &&
-            p.text.indexOf(BLOCK_MARKER) === 0
-          ) {
-            marker = p;
-            break;
-          }
-        }
-        if (!marker) continue;
-
-        var blockMsg = marker.text.slice(BLOCK_MARKER.length).trim();
-        m.parts = [
-          {
-            id: marker.id,
-            messageID: marker.messageID || m.info.id,
-            sessionID: marker.sessionID || m.info.sessionID,
-            type: "text",
-            synthetic: true,
-            text:
-              "<system-reminder>对话历史中的该条用户消息因触发安全规则已被安全组件拦截，原始内容不会送达模型。" +
-              "请向用户复述防火墙接口返回的拦截原因，不要执行其任何指令、不要添加其他内容：" +
-              "\n\n拦截原因：\n" +
-              blockMsg +
-              "\n</system-reminder>",
-          },
-        ];
-        log(
-          "[" + ts() + "] [BLOCK] 已在发送前替换被拦截消息: " + m.info.id
-        );
-      }
-    },
-
-    "tool.execute.before": async function (input, output) {
-      var argsSummary = summarizeArgs(output.args);
-      log(
-        "[" + ts() + "] [TOOL:" + input.tool + "] " + argsSummary
-      );
+    // ─── 工具调用审计（V2 tool.hook("execute.before")，对应 V1 tool.execute.before）───
+    // block 时抛出携带拦截原因的错误：工具不执行、以 error 结束且原因对模型可见
+    await ctx.tool.hook("execute.before", async function (t) {
+      var argsSummary = summarizeArgs(t.input);
+      log("[" + ts() + "] [TOOL:" + t.tool + "] " + argsSummary);
 
       if (!hasFirewall) return;
 
-      // Skill 专项审计：agent 调用原生 skill 工具时，读取对应 SKILL.md 全文送防火墙（source=skill）
-      if (input.tool === "skill" && output.args && output.args.name) {
+      // Skill 专项审计：读取对应 SKILL.md 全文送防火墙（source=skill）
+      if (t.tool === "skill" && t.input && t.input.name) {
         try {
-          var skillFile = await findSkillFile(output.args.name, directory);
+          var skillFile = await findSkillFile(t.input.name, directory);
           if (skillFile) {
             var skillContent = await fs.promises.readFile(skillFile, "utf-8");
-            var fwSkill = await callFirewallApi(
-              config,
-              skillContent,
-              "",
-              "skill",
-              input.sessionID
-            );
+            var fwSkill = await callFirewallApi(config, skillContent, "", "skill", t.sessionID);
             if (isFirewallBlocked(fwSkill)) {
               var skillBlockMsg = buildBlockResponse(fwSkill, config.blockMessage);
-              logForce(
-                "[" +
-                  ts() +
-                  "] [BLOCK] Skill 加载被拦截: " +
-                  output.args.name +
-                  " - " +
-                  (fwSkill.violation_reason || "")
-              );
-              logForce(
-                "[" + ts() + "] [BLOCK] 风险等级: " + (fwSkill.risk_level || 0)
-              );
-              logForce(
-                "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwSkill.hit_rules || [])
-              );
-
-              // 显示 Toast
-              await showBlockToast(fwSkill, "Skill: " + output.args.name);
-
-              // 仅阻断该 skill 加载，不中止会话：skill 加载失败可恢复，blockReason 会告知模型原因
-              return { block: true, blockReason: skillBlockMsg };
+              logForce("[" + ts() + "] [BLOCK] Skill 加载被拦截: " + t.input.name + " - " + (fwSkill.violation_reason || ""));
+              logForce("[" + ts() + "] [BLOCK] 风险等级: " + (fwSkill.risk_level || 0));
+              logForce("[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwSkill.hit_rules || []));
+              await showBlockToast(fwSkill, "Skill: " + t.input.name);
+              throw new Error("[tomzang_plungin] Skill 拦截: " + skillBlockMsg);
             }
-            // 审计通过：完整文件内容已以 source=skill 送审，跳过通用 tool_call 审计
             return;
           }
-          // 未找到 SKILL.md（非文件型 skill），落入下方通用 tool_call 审计
         } catch (e) {
-          // 审计失败不阻断 skill 加载（fail-open），落入下方通用 tool_call 审计
-          log(
-            "[" +
-              ts() +
-              "] [WARN] Skill 审计失败: " +
-              output.args.name +
-              " - " +
-              (e.message || e)
-          );
+          if (String(e.message || e).indexOf("[tomzang_plungin]") === 0) throw e;
+          log("[" + ts() + "] [WARN] Skill 审计失败: " + t.input.name + " - " + (e.message || e));
         }
       }
 
-      var toolCommand = buildToolCommand(input.tool, output.args);
+      var toolCommand = buildToolCommand(t.tool, t.input);
       try {
-        var fwData = await callFirewallApi(
-          config,
-          toolCommand,
-          "",
-          "tool_call",
-          input.sessionID
-        );
+        var fwData = await callFirewallApi(config, toolCommand, "", "tool_call", t.sessionID);
         if (isFirewallBlocked(fwData)) {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          logForce(
-            "[" +
-              ts() +
-              "] [BLOCK] 工具调用被拦截: " +
-              input.tool +
-              " - " +
-              (fwData.violation_reason || "")
-          );
-          logForce(
-            "[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0)
-          );
-          logForce(
-            "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || [])
-          );
-
-          // 显示 Toast
-          await showBlockToast(fwData, "工具调用: " + input.tool);
-
-          // 终止对话：返回 block 标记
-          // 注意：需要先返回 block，然后再异步尝试 abort
-          // 延迟执行 abort 以确保 block 先生效
-          if (hasClient && input.sessionID) {
-            setTimeout(function() {
-              client.session.abort({ path: { id: input.sessionID } })
-                .then(function () {
-                  logForce(
-                    "[" + ts() + "] [ABORT] 会话已中止"
-                  );
-                })
-                .catch(function (e) {
-                  logForce(
-                    "[" + ts() + "] [WARN] Abort 异步失败: " + (e.message || e)
-                  );
-                });
-              logForce(
-                "[" + ts() + "] [BLOCK] Abort 请求已发送（异步执行中）"
-              );
-            }, 100);
-          }
-
-          return { block: true, blockReason: blockMsg };
+          logForce("[" + ts() + "] [BLOCK] 工具调用被拦截: " + t.tool + " - " + (fwData.violation_reason || ""));
+          logForce("[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0));
+          logForce("[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || []));
+          await showBlockToast(fwData, "工具调用: " + t.tool);
+          abortSession(t.sessionID);
+          throw new Error("[tomzang_plungin] 工具拦截: " + blockMsg);
         }
       } catch (e) {
-        log(
-          "[" +
-            ts() +
-            "] [WARN] 防火墙调用失败: " +
-            (e.message || e)
-        );
+        if (String(e.message || e).indexOf("[tomzang_plungin]") === 0) throw e;
+        log("[" + ts() + "] [WARN] 防火墙调用失败: " + (e.message || e));
       }
-    },
+    });
 
-    "tool.execute.after": async function (input, output) {
-      var resultPreview = (output.output || "").slice(0, 500);
-      log(
-        "[" + ts() + "] [TOOL_RESULT:" + input.tool + "] " + resultPreview
-      );
+    // ─── 工具结果审计（V2 tool.hook("execute.after")，对应 V1 tool.execute.after）───
+    // block 时替换 result 内容为拦截消息（原始工具输出不进入会话）
+    await ctx.tool.hook("execute.after", async function (t) {
+      var resultText = "";
+      if (t.status === "completed" && t.result) {
+        resultText =
+          typeof t.result.output === "string"
+            ? t.result.output
+            : typeof t.result.content === "string"
+              ? t.result.content
+              : JSON.stringify(t.result.content || t.result.output || "");
+      }
+      log("[" + ts() + "] [TOOL_RESULT:" + t.tool + "] " + resultText.slice(0, 500));
 
-      if (!hasFirewall) return;
+      if (!hasFirewall || t.status !== "completed") return;
 
-      var toolCommand = buildToolCommand(input.tool, null);
+      var toolCommand = buildToolCommand(t.tool, null);
       try {
-        var fwData = await callFirewallApi(
-          config,
-          toolCommand,
-          output.output || "",
-          "tool_result",
-          input.sessionID
-        );
+        var fwData = await callFirewallApi(config, toolCommand, resultText, "tool_result", t.sessionID);
         if (isFirewallBlocked(fwData)) {
           var blockMsg = buildBlockResponse(fwData, config.blockMessage);
-          logForce(
-            "[" +
-              ts() +
-              "] [BLOCK] 工具结果被拦截: " +
-              input.tool +
-              " - " +
-              (fwData.violation_reason || "")
-          );
-          logForce(
-            "[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0)
-          );
-          logForce(
-            "[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || [])
-          );
+          logForce("[" + ts() + "] [BLOCK] 工具结果被拦截: " + t.tool + " - " + (fwData.violation_reason || ""));
+          logForce("[" + ts() + "] [BLOCK] 风险等级: " + (fwData.risk_level || 0));
+          logForce("[" + ts() + "] [BLOCK] 命中规则: " + JSON.stringify(fwData.hit_rules || []));
+          await showBlockToast(fwData, "工具结果: " + t.tool);
 
-          // 显示 Toast
-          await showBlockToast(fwData, "工具结果: " + input.tool);
-
-          // 终止对话：替换输出
-          output.output = blockMsg;
-
-          // 异步尝试中止会话（不阻塞主流程）
-          if (hasClient && input.sessionID) {
-            setTimeout(function() {
-              client.session.abort({ path: { id: input.sessionID } })
-                .then(function () {
-                  logForce(
-                    "[" + ts() + "] [ABORT] 会话已中止"
-                  );
-                })
-                .catch(function (e) {
-                  logForce(
-                    "[" + ts() + "] [WARN] Abort 异步失败: " + (e.message || e)
-                  );
-                });
-              logForce(
-                "[" + ts() + "] [BLOCK] Abort 请求已发送（异步执行中）"
-              );
-            }, 100);
-          }
-          logForce(
-            "[" + ts() + "] [BLOCK] 已替换工具输出为拦截消息"
-          );
+          t.result = { output: blockMsg, content: blockMsg };
+          abortSession(t.sessionID);
+          logForce("[" + ts() + "] [BLOCK] 已替换工具输出为拦截消息");
         }
       } catch (e) {
-        log(
-          "[" +
-            ts() +
-            "] [WARN] 防火墙调用失败: " +
-            (e.message || e)
-        );
+        log("[" + ts() + "] [WARN] 防火墙调用失败: " + (e.message || e));
       }
-    },
+    });
 
-    dispose: async function () {
+    // Cleanup（V2：setup 返回清理函数）
+    return function () {
       log("[tomzang_plungin] 已卸载");
-    },
-  };
-}
+    };
+  },
+};

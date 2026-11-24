@@ -2,7 +2,7 @@
 
 OpenCode 插件 — 记录用户输入和工具调用日志，并集成 OpenClaw ToolGuard 防火墙进行安全审计。
 
-> 当前已适配 OpenCode 最新版本 **1.19.6**（适配于 2026-11-19，插件版本 v2026-11-19）<!-- AUTOUPDATE:supported-version -->
+> 当前已适配 OpenCode V2 最新版本 **2.4.1**（适配于 2026-11-24，插件版本 v2026-11-24）<!-- AUTOUPDATE:supported-version -->
 
 ## 功能
 

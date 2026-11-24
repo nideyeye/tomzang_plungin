@@ -586,8 +586,8 @@ install_project() {
     # 写入配置到独立配置文件（项目目录）
     write_plugin_config_to_dir "${target_plugin_dir}"
 
-    # 更新 opencode.json 配置
-    update_opencode_config "${plugin_path}"
+    # V2 无需写 opencode.json：.opencode/plugins/ 直属插件目录由 OpenCode V2 自动发现
+    # （声明本地路径会被当作包安装处理，无 package.json 时直接失败）
 
     success "项目级安装完成"
     if [[ "${need_copy_files}" == true ]]; then
@@ -613,8 +613,8 @@ install_global() {
     # 写入配置到独立配置文件（全局目录）
     write_plugin_config_to_dir "${target_plugin_dir}"
 
-    # 更新 opencode.json 配置
-    update_opencode_config "${target_plugin_dir}/index.js"
+    # V2 无需写 opencode.json：~/.config/opencode/plugins/ 直属插件目录由 OpenCode V2 自动发现
+    # （声明本地路径会被当作包安装处理，无 package.json 时直接失败）
 
     success "全局级安装完成"
     info "插件目录: ${target_plugin_dir}"
@@ -667,44 +667,6 @@ detect_shell_config() {
     esac
 }
 
-# 更新 opencode.json 配置
-update_opencode_config() {
-    local plugin_path="$1"
-    local config_file="${OPENCODE_CONFIG_FILE}"
-
-    # 转换为 file:// URL 格式
-    local file_url="file://${plugin_path}"
-
-    info "更新 OpenCode 配置: ${config_file}"
-
-    # 确保配置文件存在
-    if [[ ! -f "${config_file}" ]]; then
-        info "创建全局配置文件"
-        mkdir -p "${OPENCODE_CONFIG_DIR}"
-        echo '{"plugin":[]}' > "${config_file}"
-    fi
-
-    # 使用 jq 添加插件
-    if command -v jq &> /dev/null; then
-        # 检查插件是否已存在
-        # 注意: 已存在的 opencode.json 可能没有 plugin 键（null），
-        # 直接 .plugin[] 迭代会报错并中止安装，必须先兜底为空数组
-        local current_plugins
-        current_plugins=$(jq -r '(.plugin // [])[]' "${config_file}")
-
-        if echo "${current_plugins}" | grep -qF "${file_url}"; then
-            info "插件已在配置中"
-        else
-            local new_config
-            new_config=$(jq --arg plugin "${file_url}" '.plugin = ((.plugin // []) + [$plugin])' "${config_file}")
-            echo "${new_config}" > "${config_file}"
-            success "已添加插件到配置文件"
-        fi
-    else
-        warn "未安装 jq，请手动添加以下内容到 ${config_file}:"
-        warn "在 \"plugin\" 数组中添加: \"${file_url}\""
-    fi
-}
 
 # 写入配置到独立配置文件
 write_plugin_config_to_dir() {
